@@ -1,0 +1,14 @@
+# editor / OS
+.DS_Store
+*.swp
+
+# python
+__pycache__/
+*.py[cod]
+
+# local media and exports
+*.mp4
+*.mov
+*.mkv
+*.webm
+track.json
