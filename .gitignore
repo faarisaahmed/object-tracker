@@ -12,3 +12,4 @@ __pycache__/
 *.mkv
 *.webm
 track.json
+*.filter.txt

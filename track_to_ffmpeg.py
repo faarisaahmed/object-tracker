@@ -48,14 +48,19 @@ def tangents(pts):
 def interp(keys, axis, crop, frame, mode):
     """Nested if() over t giving the crop's leading edge on one axis.
 
-    Keyframes are subject centres, so the edge is centre - crop/2, clamped so
-    the box stays inside the frame -- exactly what the page does before drawing.
+    Keyframes are subject centres (not clamped: the subject can sit where the
+    crop can't centre on it), so the path is interpolated first and the edge
+    centre - crop/2 clamped into the frame afterwards -- exactly what the page
+    does before drawing.
     """
-    edge = lambda k: min(max(k[axis] - crop / 2, 0), frame - crop)
+    edge = lambda k: k[axis] - crop / 2
     pts = [(k['t'], edge(k)) for k in sorted(keys, key=lambda k: k['t'])]
     m = tangents(pts) if mode == 'spline' else None
-    expr = '%.3f' % pts[-1][1]
-    for i in reversed(range(len(pts) - 1)):
+    # A flat sum of time-gated segments rather than nested if()s: ffmpeg's
+    # expression parser gives up past ~100 levels of nesting, and an
+    # auto-tracked clip can have hundreds of keyframes.
+    terms = ['lt(t,%.4f)*%.3f' % (pts[0][0], pts[0][1])]
+    for i in range(len(pts) - 1):
         (t0, v0), (t1, v1) = pts[i], pts[i + 1]
         h = max(t1 - t0, 1e-6)
         u = '((t-%.4f)/%.4f)' % (t0, h)
@@ -68,8 +73,9 @@ def interp(keys, axis, crop, frame, mode):
             if mode == 'ease':
                 u = '(%s*%s*(3-2*%s))' % (u, u, u)   # smoothstep, same as the page
             seg = '(%.3f+(%.3f)*%s)' % (v0, v1 - v0, u)
-        expr = 'if(lt(t,%.4f),%s,%s)' % (t1, seg, expr)
-    expr = 'if(lt(t,%.4f),%.3f,%s)' % (pts[0][0], pts[0][1], expr)
+        terms.append('gte(t,%.4f)*lt(t,%.4f)*%s' % (t0, t1, seg))
+    terms.append('gte(t,%.4f)*%.3f' % (pts[-1][0], pts[-1][1]))
+    expr = '+'.join(terms)
     return 'clip(%s,0,%d)' % (expr, frame - crop)
 
 
@@ -104,7 +110,15 @@ def main():
     if a.fps:
         chain.append('fps=%d' % a.fps)
 
-    cmd = ['ffmpeg', '-y', '-i', a.input, '-vf', ','.join(chain),
+    # an auto-tracked clip can have hundreds of keyframes, which makes the
+    # filter too long for one command-line argument: hand it over in a file
+    vf, script = ','.join(chain), None
+    if len(vf) > 8000:
+        script = a.output + '.filter.txt'
+        with open(script, 'w') as f:
+            f.write(vf)
+    cmd = ['ffmpeg', '-y', '-i', a.input] + (
+        ['-filter_script:v', script] if script else ['-vf', vf]) + [
            '-c:v', 'libx264', '-preset', 'slow', '-crf', str(a.crf),
            '-pix_fmt', 'yuv420p', '-movflags', '+faststart',
            '-c:a', 'aac', '-b:a', '192k', a.output]
@@ -116,7 +130,10 @@ def main():
         return
     if not os.path.exists(a.input):
         raise SystemExit('no such input: %s' % a.input)
-    sys.exit(subprocess.call(cmd))
+    rc = subprocess.call(cmd)
+    if script and rc == 0:
+        os.remove(script)
+    sys.exit(rc)
 
 
 if __name__ == '__main__':

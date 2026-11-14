@@ -54,21 +54,32 @@ For subjects that move a lot, such as sport, pets, or anything handheld,
 hand-keyframing gets tedious. Auto-track follows the subject for you:
 
 1. Scrub to where you want tracking to start and drag the crop onto the subject.
-2. Adjust **target** so the dashed square covers something distinctive on the
-   subject, such as a face, a jersey, or a logo. Smaller is more precise; bigger
-   is more robust when the subject turns or blurs.
+2. Adjust **target** so the dashed square sits snugly on the subject. It
+   should cover mostly subject, with little background.
 3. Hit **auto-track** (or **t**). The crop follows live as it goes. **Esc** or
    **stop** ends it early.
 
-It samples the clip 20 times a second and matches the dashed patch from frame to
-frame. Then it reduces that path to a light set of normal keyframes at the
-points where the motion actually bends, so you can fix any of them by hand
-afterwards. Keyframes before the start point are kept, and so are any after the
+It samples the clip 20 times a second and picks one of two ways to find the
+subject, based on what's in the dashed square. The status line shows which one
+it chose.
+
+- **By colour**, when the subject's colours stand out from the scene: a red
+  cloak, a team shirt, a ball. It learns which hues are far more common on the
+  subject than around it, then follows that blob. This copes with fast
+  motion, pose changes, and lighting shifts. If the subject vanishes, it
+  searches the whole frame and picks it up again when it reappears.
+- **By pattern**, otherwise. It matches the dashed patch frame to frame and
+  checks each match against the subject's original look and its mirror image.
+  That stops it from sliding onto static background or a game HUD.
+
+Then it reduces that path to a light set of normal keyframes at the points
+where the motion actually bends, so you can fix any of them by hand afterwards. Keyframes before the start point are kept, and so are any after the
 point where tracking stopped. Everything in between is replaced. **ctrl+z**
 undoes the whole run.
 
-If the subject is hidden, leaves the frame, or changes too much, tracking stops
-and tells you the time instead of drifting onto the background. Scrub there,
+It coasts through short flashes and occlusions. If the subject stays gone for
+more than 1.5 s, tracking stops and tells you the time instead of drifting onto
+the background. Scrub there,
 drag the crop back onto the subject, and track again from that point.
 
 Tracking runs at seek speed rather than playback speed: roughly 2–4× the clip's
@@ -170,8 +181,15 @@ exported. Older `track.json` files that only have `"ease"` still work.
 ```
 
 Use `--print` if you'd rather hand-edit the filter or drive it from another
-tool. The keyframes are `{t, x, y}` subject centres in source pixels, so the
-JSON stays meaningful at any output size:
+tool. Auto-tracked clips can have hundreds of keyframes, which is too long for
+one command-line argument, so long filters are written to
+`<output>.filter.txt` and passed with `-filter_script:v`.
+
+The keyframes are `{t, x, y}` subject centres in source pixels, so the JSON
+stays meaningful at any output size. They record where the subject *is*, even
+on an axis the crop can't pan. At 9:16 on 16:9 footage, `y` is still the
+subject's height in frame. The crop is clamped into the frame only when it's
+rendered, so changing zoom or aspect later doesn't lose anything:
 
 ```json
 {
