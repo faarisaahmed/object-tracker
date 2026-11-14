@@ -97,6 +97,10 @@ def main():
     mode = tr.get('interp')
     if mode not in ('spline', 'ease', 'linear'):   # older exports only had ease
         mode = 'ease' if tr.get('ease', True) else 'linear'
+    # with a camera style other than "locked on", the page exports the finished
+    # camera path: dense, already smoothed, rendered as-is
+    if tr.get('cameraPath'):
+        keys, mode = tr['cameraPath'], 'linear'
 
     # even dimensions, or H.264 refuses the frame size
     oh = a.height or chh
@@ -124,7 +128,8 @@ def main():
            '-c:a', 'aac', '-b:a', '192k', a.output]
 
     print('%d keyframes  %dx%d crop  ->  %dx%d  %s' % (
-        len(keys), cw, chh, ow, oh, {'spline': 'smooth', 'ease': 'ease each'}.get(mode, mode)))
+        len(keys), cw, chh, ow, oh, ('camera: %s' % tr['camera']) if tr.get('cameraPath')
+        else {'spline': 'smooth', 'ease': 'ease each'}.get(mode, mode)))
     if a.dry:
         print('\n' + ' '.join(shlex.quote(c) for c in cmd))
         return

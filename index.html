@@ -114,6 +114,12 @@
       <option value="1920">1920</option><option value="1280" selected>1280</option>
       <option value="1080">1080</option><option value="native">native</option>
     </select></label>
+    <label title="how the camera follows the subject: hold still while it moves around inside the shot, or stay locked on it">camera <select id="camera">
+      <option value="follow">locked on</option>
+      <option value="smooth">smooth</option>
+      <option value="calm" selected>calm</option>
+      <option value="steady">steady</option>
+    </select></label>
     <label>motion <select id="interp">
       <option value="spline" selected>smooth</option>
       <option value="ease">ease each</option>
@@ -223,7 +229,60 @@ function at(t){
 // Keys hold where the SUBJECT is, unclamped -- even on an axis the crop can't
 // pan. The crop is clamped into the frame only here, when it's drawn, so a
 // later zoom or aspect change still knows where the subject was.
-function crop(t){ const p=at(t); return {x:clampX(p.x),y:clampY(p.y)}; }
+function crop(t){
+  const c=CAM[$('camera').value];
+  let p;
+  if(!c||tracking||!vid.duration) p=at(t);
+  else { const P=camPath(), f=Math.max(0,Math.min(P.xs.length-1,t/P.dt)), i=Math.floor(f),
+      j=Math.min(i+1,P.xs.length-1), u=f-i;
+    p={x:P.xs[i]+(P.xs[j]-P.xs[i])*u, y:P.ys[i]+(P.ys[j]-P.ys[i])*u}; }
+  return {x:clampX(p.x),y:clampY(p.y)};
+}
+
+/* ---------- camera ---------- */
+// The keys say where the SUBJECT is. The camera doesn't have to copy every move:
+// like an operator, it can hold still while the subject moves around inside the
+// shot and only pan when the subject nears the edge of a "zone" around centre.
+// Run that hold-until-pushed rule forwards and backwards in time and average
+// the two, so the camera moves ahead of the subject rather than lagging behind
+// it, then round off the starts and stops while keeping inside the zone.
+//   [zone: share of the free room each side of the subject, blur in seconds]
+const CAM={follow:null, smooth:[0.35,0.15], calm:[0.6,0.2], steady:[0.8,0.3]};
+const CDT=1/20;
+let camCache={sig:null};
+function gauss(a,sg){
+  const r=Math.ceil(sg*3), k=[]; for(let i=-r;i<=r;i++) k.push(Math.exp(-i*i/(2*sg*sg)));
+  const o=new Float64Array(a.length);
+  for(let i=0;i<a.length;i++){ let s=0,w=0;
+    for(let j=-r;j<=r;j++){ const q=i+j; if(q<0||q>=a.length) continue; s+=a[q]*k[j+r]; w+=k[j+r]; }
+    o[i]=s/w; }
+  return o;
+}
+function tube(s,m,sg){
+  const n=s.length, f=Float64Array.from(s), b=Float64Array.from(s);
+  if(m<=0||n<2) return f;
+  const keep=(prev,i)=>Math.max(s[i]-m,Math.min(s[i]+m,prev));   // hold until pushed
+  for(let i=1;i<n;i++) f[i]=keep(f[i-1],i);
+  for(let i=n-2;i>=0;i--) b[i]=keep(b[i+1],i);
+  let c=new Float64Array(n); for(let i=0;i<n;i++) c[i]=(f[i]+b[i])/2;
+  for(let it=0;it<8;it++){
+    c=gauss(c,sg);
+    for(let i=0;i<n;i++) c[i]=Math.max(s[i]-m,Math.min(s[i]+m,c[i]));
+  }
+  return c;
+}
+function camPath(){
+  let h=0; for(const k of keys) h=(h*31+k.t*1009+k.x*7+k.y*3)%1e9;
+  const sig=[h,keys.length,$('camera').value,$('interp').value,cw,ch,$('tsize').value,vid.duration].join('|');
+  if(camCache.sig===sig) return camCache;
+  const [zone,blur]=CAM[$('camera').value], n=Math.ceil(vid.duration/CDT)+1;
+  const sx=new Float64Array(n), sy=new Float64Array(n);
+  for(let i=0;i<n;i++){ const p=at(i*CDT); sx[i]=clampX(p.x); sy[i]=clampY(p.y); }
+  // room the subject can drift each side of centre while staying in shot
+  const half=tgtSide()/2, mx=zone*Math.max(0,cw/2-half), my=zone*Math.max(0,ch/2-half);
+  camCache={sig,dt:CDT, xs:W-cw>1?tube(sx,mx,blur/CDT):sx, ys:H-ch>1?tube(sy,my,blur/CDT):sy};
+  return camCache;
+}
 
 /* ---------- undo ---------- */
 let undoStack=[], redoStack=[];
@@ -392,6 +451,7 @@ $('undo').onclick=undo; $('redo').onclick=redo;
   layout(); drawFilm(); draw();
 }));
 $('interp').addEventListener('change',()=>{ drawFilm(); draw(); });
+$('camera').addEventListener('change',()=>{ drawFilm(); draw(); });
 addEventListener('keydown',e=>{
   if(['INPUT','SELECT'].includes(e.target.tagName)) return;
   if(e.key==='Escape'&&tracking){ stopTrack=true; return; }
@@ -658,6 +718,7 @@ function applyTrack(tr){
   if(tr.zoom>0){ $('zoom').value=Math.round(Math.min(3,Math.max(1,tr.zoom))*100);
     $('zoomv').textContent=(+$('zoom').value/100).toFixed(2)+'×'; }
   $('interp').value=['spline','ease','linear'].includes(tr.interp)?tr.interp:(tr.ease===false?'linear':'ease');
+  if(tr.camera in CAM) $('camera').value=tr.camera;
   cropSize();
   keys=tr.keys.map(k=>({t:+k.t,x:k.x*sx,y:k.y*sy})).sort((a,b)=>a.t-b.t);
   sel=-1; layout(); renderKeys(); drawFilm(); draw();
@@ -665,10 +726,18 @@ function applyTrack(tr){
 }
 
 /* ---------- export ---------- */
+// the camera path as linear keys (null when locked on): what track_to_ffmpeg.py renders
+function cameraKeys(){
+  if(!CAM[$('camera').value]||!vid.duration) return null;
+  const P=camPath(), pts=[];
+  for(let i=0;i<P.xs.length;i++) pts.push({t:Math.min(i*P.dt,vid.duration),x:clampX(P.xs[i]),y:clampY(P.ys[i])});
+  return simplify(pts,0.4).map(k=>({t:+k.t.toFixed(3),x:+k.x.toFixed(1),y:+k.y.toFixed(1)}));
+}
 $('json').onclick=()=>{
   const b=new Blob([JSON.stringify({source:SRCNAME,width:W,height:H,
     crop:{w:cw,h:ch},aspect:aspect(),zoom:+$('zoom').value/100,
     interp:$('interp').value, ease:$('interp').value!=='linear',
+    camera:$('camera').value, cameraPath:cameraKeys(),
     keys:keys.map(k=>({t:+k.t.toFixed(3),x:Math.round(k.x),y:Math.round(k.y)}))},null,1)],
     {type:'application/json'});
   const a=document.createElement('a'); a.href=URL.createObjectURL(b);

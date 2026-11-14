@@ -121,6 +121,21 @@ The last remaining keyframe can't be deleted.
   1.00× a 9:16 crop of 16:9 footage is full height, so it can only pan
   sideways. Past 1.00× it has room to pan on *both* axes, which is what makes
   this a tracker rather than a horizontal pan.
+- **camera**: how closely the camera follows the subject. Keyframes always
+  record where the subject *is*; this decides how the camera reacts to it.
+  - **calm** (default): like a camera operator. It holds still while the
+    subject moves around inside the shot, and pans only when the subject nears
+    the edge of a zone around centre. The camera moves ahead of the subject
+    instead of lagging behind it.
+  - **smooth**: a tighter zone, so it follows more closely but still filters
+    out jitter.
+  - **steady**: the widest zone, with the least movement. A very fast subject
+    can briefly leave the shot.
+  - **locked on**: the crop centres exactly on the keyframe path.
+
+  The setting is instant and doesn't touch your keyframes, so switch freely
+  after tracking. **export json** includes the finished camera path, which is
+  what `track_to_ffmpeg.py` renders.
 - **motion**: how the crop travels between keyframes.
   - **smooth** (default): one continuous curve through all the keys. It
     flows through a key when the motion carries on in the same direction,
