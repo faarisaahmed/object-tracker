@@ -53,6 +53,8 @@
   #prog{display:none;align-items:center;gap:8px}
   #pbar{width:190px;height:6px;background:var(--panel2);border-radius:3px;overflow:hidden}
   #pfill{height:100%;width:0;background:var(--acc)}
+  #msg{color:var(--warn);font-size:11.5px}
+  #trk.on{background:var(--ok);border-color:var(--ok);color:#101017}
 </style>
 </head>
 <body>
@@ -85,7 +87,11 @@
     <button id="setkf">set keyframe</button>
     <button id="delkf">delete</button>
     <button id="clear">clear all</button>
-    <label>ease <input type="checkbox" id="ease" checked></label>
+    <button id="undo" title="undo (ctrl/⌘+z)">↶</button><button id="redo" title="redo (ctrl/⌘+shift+z)">↷</button>
+    <button id="trk" title="follow the subject automatically from the current time (t)">auto-track</button>
+    <label title="size of the patch the tracker locks onto (dashed square)">target
+      <input type="range" id="tsize" min="4" max="60" value="18"></label>
+    <span id="msg"></span>
     <span id="info"></span>
   </div>
 
@@ -108,9 +114,15 @@
       <option value="1920">1920</option><option value="1280" selected>1280</option>
       <option value="1080">1080</option><option value="native">native</option>
     </select></label>
+    <label>motion <select id="interp">
+      <option value="spline" selected>smooth</option>
+      <option value="ease">ease each</option>
+      <option value="linear">linear</option>
+    </select></label>
     <label>fps <select id="ofps"><option>60</option><option selected>30</option></select></label>
     <button id="export">export video</button>
     <button id="json">export json</button>
+    <button id="imp">import json</button><input type="file" id="impf" accept=".json,application/json" hidden>
     <div id="prog"><div id="pbar"><div id="pfill"></div></div><span id="ptxt"></span></div>
   </div>
 </div>
@@ -120,15 +132,20 @@ const $=id=>document.getElementById(id);
 const vid=$('src'), ov=$('ov'), out=$('out');
 let keys=[];                      // {t,x,y} subject centre in source pixels
 let sel=-1, W=0, H=0, cw=0, ch=0, dragging=false, SRCNAME='(none)';
+let tracking=false, stopTrack=false, tgt=null, pendingTrack=null, thumbs=[];
+const say=m=>{ $('msg').textContent=m||''; };
 
 /* ---------- load ---------- */
 function load(url,name){ SRCNAME=name||url; keys=[]; thumbs=[];
   vid.src=url; vid.load(); $('empty').style.display='none'; }
 $('file').onchange=e=>{ const f=e.target.files[0]; if(f) load(URL.createObjectURL(f),f.name); };
 addEventListener('dragover',e=>e.preventDefault());
-addEventListener('drop',e=>{ e.preventDefault();
-  const f=[...e.dataTransfer.files].find(x=>x.type.startsWith('video/'));
-  if(f) load(URL.createObjectURL(f),f.name); });
+addEventListener('drop',e=>{ e.preventDefault(); if(tracking) return;
+  const fs=[...e.dataTransfer.files];
+  const f=fs.find(x=>x.type.startsWith('video/'));
+  const j=fs.find(x=>x.name.toLowerCase().endsWith('.json'));
+  if(f) load(URL.createObjectURL(f),f.name);
+  if(j) readTrack(j); });
 vid.addEventListener('error',()=>{ $('empty').style.display='grid'; });
 // ?v=path loads a video straight from the server, handy for a fixed workflow
 const q=new URLSearchParams(location.search).get('v');
@@ -137,6 +154,8 @@ if(q) load(q,q.split('/').pop());
 vid.addEventListener('loadedmetadata',()=>{
   W=vid.videoWidth; H=vid.videoHeight; cropSize();
   if(!keys.length) keys=[{t:0,x:W/2,y:H/2}];
+  undoStack=[]; redoStack=[];
+  if(pendingTrack){ const p=pendingTrack; pendingTrack=null; applyTrack(p); }
   layout(); ticks(); renderKeys(); draw(); buildFilm(vid.currentSrc||vid.src);
 });
 
@@ -169,18 +188,46 @@ function layout(){
 addEventListener('resize',()=>{ if(W){layout(); drawFilm(); draw();} });
 
 /* ---------- interpolation ---------- */
+// Monotone cubic (Fritsch-Carlson) tangents. The ends are 0 so the crop holds
+// still outside the keyed range, and a key where the motion reverses gets 0 too,
+// so the crop never overshoots past where you put it. track_to_ffmpeg.py
+// computes exactly the same thing.
+function tangents(k,a){
+  const n=k.length, d=[], m=new Array(n).fill(0);
+  for(let i=0;i<n-1;i++) d.push((k[i+1][a]-k[i][a])/Math.max(1e-6,k[i+1].t-k[i].t));
+  for(let i=1;i<n-1;i++) if(d[i-1]*d[i]>0) m[i]=(d[i-1]+d[i])/2;
+  for(let i=0;i<n-1;i++){
+    if(d[i]===0){ m[i]=0; m[i+1]=0; continue; }
+    const al=m[i]/d[i], be=m[i+1]/d[i], s=al*al+be*be;
+    if(s>9){ const tau=3/Math.sqrt(s); m[i]=tau*al*d[i]; m[i+1]=tau*be*d[i]; }
+  }
+  return m;
+}
 function at(t){
   if(!keys.length) return {x:W/2,y:H/2};
-  const k=[...keys].sort((a,b)=>a.t-b.t);
-  if(t<=k[0].t) return k[0];
-  if(t>=k[k.length-1].t) return k[k.length-1];
-  for(let i=0;i<k.length-1;i++) if(t>=k[i].t&&t<=k[i+1].t){
-    let u=(t-k[i].t)/Math.max(1e-6,k[i+1].t-k[i].t);
-    if($('ease').checked) u=u*u*(3-2*u);
-    return {x:k[i].x+(k[i+1].x-k[i].x)*u, y:k[i].y+(k[i+1].y-k[i].y)*u};
+  const k=[...keys].sort((a,b)=>a.t-b.t), n=k.length;
+  if(t<=k[0].t) return {x:k[0].x,y:k[0].y};
+  if(t>=k[n-1].t) return {x:k[n-1].x,y:k[n-1].y};
+  let i=0; while(i<n-2&&t>k[i+1].t) i++;
+  const h=Math.max(1e-6,k[i+1].t-k[i].t), mode=$('interp').value;
+  let u=(t-k[i].t)/h;
+  if(mode==='spline'){
+    const mx=tangents(k,'x'), my=tangents(k,'y');
+    const u2=u*u, u3=u2*u, h00=2*u3-3*u2+1, h10=u3-2*u2+u, h01=-2*u3+3*u2, h11=u3-u2;
+    return { x:clampX(h00*k[i].x+h10*h*mx[i]+h01*k[i+1].x+h11*h*mx[i+1]),
+             y:clampY(h00*k[i].y+h10*h*my[i]+h01*k[i+1].y+h11*h*my[i+1]) };
   }
-  return k[k.length-1];
+  if(mode==='ease') u=u*u*(3-2*u);
+  return {x:k[i].x+(k[i+1].x-k[i].x)*u, y:k[i].y+(k[i+1].y-k[i].y)*u};
 }
+
+/* ---------- undo ---------- */
+let undoStack=[], redoStack=[];
+const snap=()=>JSON.stringify(keys);
+function pushUndo(){ undoStack.push(snap()); if(undoStack.length>200) undoStack.shift(); redoStack=[]; }
+function restore(s){ keys=JSON.parse(s); sel=-1; renderKeys(); drawFilm(); draw(); }
+function undo(){ if(tracking||!undoStack.length) return; redoStack.push(snap()); restore(undoStack.pop()); }
+function redo(){ if(tracking||!redoStack.length) return; undoStack.push(snap()); restore(redoStack.pop()); }
 function setKey(t,x,y){
   const i=keys.findIndex(k=>Math.abs(k.t-t)<0.04);
   if(i>=0){ keys[i].x=x; keys[i].y=y; sel=i; }
@@ -192,7 +239,7 @@ function setKey(t,x,y){
 const wrap=$('wrap');
 wrap.addEventListener('dragstart',e=>e.preventDefault());
 wrap.addEventListener('pointerdown',e=>{
-  if(!W) return; e.preventDefault(); dragging=true;
+  if(!W||tracking) return; e.preventDefault(); dragging=true; pushUndo();
   try{ wrap.setPointerCapture(e.pointerId); }catch(_){}
   pick(e); });
 wrap.addEventListener('pointermove',e=>{ if(dragging){ e.preventDefault(); pick(e); } });
@@ -220,6 +267,10 @@ function draw(){
   c.strokeStyle='#c8607a'; c.lineWidth=1.5;
   c.beginPath(); c.moveTo(p.x*s,t); c.lineTo(p.x*s,t+h);
   c.moveTo(l,p.y*s); c.lineTo(l+w,p.y*s); c.stroke();
+  // the patch auto-track locks onto: where it is mid-track, the crop centre otherwise
+  const g=tgt||p, ts=tgtSide()*s;
+  c.setLineDash([5,4]); c.strokeStyle=tracking?'#7fd6a0':'#ffffff66'; c.lineWidth=1.5;
+  c.strokeRect(g.x*s-ts/2,g.y*s-ts/2,ts,ts); c.setLineDash([]);
   const o=out.getContext('2d');
   o.fillStyle='#000'; o.fillRect(0,0,cw,ch);
   try{ o.drawImage(vid, p.x-cw/2,p.y-ch/2,cw,ch, 0,0,cw,ch); }catch(_){}
@@ -227,12 +278,12 @@ function draw(){
   $('head').style.left=(vid.currentTime/d*100)+'%';
   $('played').style.width=(vid.currentTime/d*100)+'%';
   $('info').textContent=`${vid.currentTime.toFixed(2)} / ${(vid.duration||0).toFixed(2)}s   `
-    +`centre ${Math.round(p.x)},${Math.round(p.y)}   ${keys.length} keyframes`;
+    +`centre ${Math.round(p.x)},${Math.round(p.y)}   ${keys.length} keyframe${keys.length===1?'':'s'}`;
 }
 (function loop(){ draw(); requestAnimationFrame(loop); })();
 
 /* ---------- filmstrip + path curve ---------- */
-let thumbs=[];
+
 async function buildFilm(url){
   thumbs=[];
   const v=document.createElement('video');
@@ -277,7 +328,7 @@ let scrub=false;
 const timeAt=e=>{ const r=$('track').getBoundingClientRect();
   return Math.max(0,Math.min(vid.duration||0,(e.clientX-r.left)/r.width*(vid.duration||0))); };
 $('track').addEventListener('pointerdown',e=>{
-  if(e.target.classList.contains('kf')||!W) return;
+  if(e.target.classList.contains('kf')||!W||tracking) return;
   e.preventDefault(); scrub=true;
   try{ $('track').setPointerCapture(e.pointerId); }catch(_){}
   vid.pause(); $('play').textContent='▶'; vid.currentTime=timeAt(e);
@@ -294,7 +345,8 @@ function renderKeys(){
     d.style.left=(k.t/(vid.duration||1)*100)+'%';
     d.title=`${k.t.toFixed(2)}s  ${Math.round(k.x)},${Math.round(k.y)}`;
     d.onpointerdown=ev=>{
-      ev.stopPropagation(); ev.preventDefault(); sel=i; vid.currentTime=k.t; renderKeys();
+      ev.stopPropagation(); ev.preventDefault(); if(tracking) return;
+      pushUndo(); sel=i; vid.currentTime=k.t; renderKeys();
       try{ d.setPointerCapture(ev.pointerId); }catch(_){}
       const move=m=>{ k.t=timeAt(m); vid.currentTime=k.t;
         keys.sort((a,b)=>a.t-b.t); sel=keys.indexOf(k); renderKeys(); drawFilm(); };
@@ -315,17 +367,19 @@ function ticks(){
 }
 
 /* ---------- transport ---------- */
-$('play').onclick=()=>{ if(!W) return;
+$('play').onclick=()=>{ if(!W||tracking) return;
   if(vid.paused){vid.play();$('play').textContent='❚❚';} else {vid.pause();$('play').textContent='▶';} };
 vid.addEventListener('ended',()=>$('play').textContent='▶');
-const stepF=d=>{ if(!W) return; vid.pause(); $('play').textContent='▶';
+const stepF=d=>{ if(!W||tracking) return; vid.pause(); $('play').textContent='▶';
   vid.currentTime=Math.max(0,Math.min(vid.duration,vid.currentTime+d/60)); };
 $('back').onclick=()=>stepF(-1); $('fwd').onclick=()=>stepF(1);
-$('setkf').onclick=()=>{ if(!W) return; const p=at(vid.currentTime);
-  setKey(vid.currentTime,p.x,p.y); draw(); };
-$('delkf').onclick=()=>{ if(sel>=0&&keys.length>1){ keys.splice(sel,1); sel=-1;
+$('setkf').onclick=()=>{ if(!W||tracking) return; const p=at(vid.currentTime);
+  pushUndo(); setKey(vid.currentTime,p.x,p.y); draw(); };
+$('delkf').onclick=()=>{ if(!tracking&&sel>=0&&keys.length>1){ pushUndo(); keys.splice(sel,1); sel=-1;
   renderKeys(); drawFilm(); draw(); } };
-$('clear').onclick=()=>{ keys=[{t:0,x:W/2,y:H/2}]; sel=-1; renderKeys(); drawFilm(); draw(); };
+$('clear').onclick=()=>{ if(!W||tracking) return; pushUndo();
+  keys=[{t:0,x:W/2,y:H/2}]; sel=-1; renderKeys(); drawFilm(); draw(); };
+$('undo').onclick=undo; $('redo').onclick=redo;
 ['ar','zoom','cw','chh'].forEach(id=>$(id).addEventListener('input',()=>{
   $('cust').style.display = $('ar').value==='custom' ? 'flex' : 'none';
   if(!W) return; cropSize();
@@ -333,9 +387,15 @@ $('clear').onclick=()=>{ keys=[{t:0,x:W/2,y:H/2}]; sel=-1; renderKeys(); drawFil
   keys.forEach(k=>{ k.x=clampX(k.x); k.y=clampY(k.y); });
   layout(); drawFilm(); draw();
 }));
-$('ease').addEventListener('change',()=>{ drawFilm(); draw(); });
+$('interp').addEventListener('change',()=>{ drawFilm(); draw(); });
 addEventListener('keydown',e=>{
   if(['INPUT','SELECT'].includes(e.target.tagName)) return;
+  if(e.key==='Escape'&&tracking){ stopTrack=true; return; }
+  if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='z'){ e.preventDefault(); e.shiftKey?redo():undo(); return; }
+  if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='y'){ e.preventDefault(); redo(); return; }
+  if(e.ctrlKey||e.metaKey||e.altKey) return;
+  if(e.key==='t'){ $('trk').click(); return; }
+  if(tracking) return;
   if(e.key===' '){e.preventDefault();$('play').click();}
   if(e.key==='ArrowLeft'){e.preventDefault();stepF(e.shiftKey?-10:-1);}
   if(e.key==='ArrowRight'){e.preventDefault();stepF(e.shiftKey?10:1);}
@@ -343,11 +403,163 @@ addEventListener('keydown',e=>{
   if(e.key==='Backspace'||e.key==='Delete'){$('delkf').click();}
 });
 
+/* ---------- auto-track ---------- */
+// Template matching by normalised cross-correlation on a downscaled grey copy of
+// each frame. The patch is the dashed square; it adapts slowly so the tracker
+// copes with the subject turning or the light changing, but stops when the best
+// match gets too weak instead of wandering off onto the background.
+const STEP=1/20;          // seconds between tracked samples
+const LOST=0.5;           // NCC below this = lost the subject
+const tgtSide=()=>Math.max(8,Math.round(Math.min(W,H)*(+$('tsize').value/100)));
+$('tsize').addEventListener('input',draw);
+
+function seekTo(t){ return new Promise(res=>{
+  const done=()=>{ clearTimeout(to); res(); };
+  const to=setTimeout(()=>{ vid.removeEventListener('seeked',done); res(); },3000);
+  vid.addEventListener('seeked',done,{once:true}); vid.currentTime=t; }); }
+
+function grabber(S){
+  const gw=Math.max(16,Math.round(W*S)), gh=Math.max(16,Math.round(H*S));
+  const cv=document.createElement('canvas'); cv.width=gw; cv.height=gh;
+  const cx=cv.getContext('2d',{willReadFrequently:true});
+  return {gw,gh,grab(){
+    cx.drawImage(vid,0,0,gw,gh);
+    const d=cx.getImageData(0,0,gw,gh).data, o=new Float32Array(gw*gh);
+    for(let i=0,j=0;j<o.length;i+=4,j++) o[j]=.299*d[i]+.587*d[i+1]+.114*d[i+2];
+    return o; }};
+}
+function cutPatch(f,gw,x0,y0,ts){
+  const p=new Float32Array(ts*ts);
+  for(let y=0;y<ts;y++){ const r=(y0+y)*gw+x0; for(let x=0;x<ts;x++) p[y*ts+x]=f[r+x]; }
+  return p;
+}
+function stats(p,ts,st){ let a=0,b=0,n=0;
+  for(let y=0;y<ts;y+=st) for(let x=0;x<ts;x+=st){ const v=p[y*ts+x]; a+=v; b+=v*v; n++; }
+  return {a,n,d:b-a*a/n}; }
+function ncc(f,gw,p,ts,x0,y0,st,T){
+  let sv=0,sv2=0,svt=0;
+  for(let y=0;y<ts;y+=st){ const r=(y0+y)*gw+x0, q=y*ts;
+    for(let x=0;x<ts;x+=st){ const v=f[r+x]; sv+=v; sv2+=v*v; svt+=v*p[q+x]; } }
+  const dv=sv2-sv*sv/T.n;
+  if(dv<1e-3||T.d<1e-3) return 0;
+  return (svt-sv*T.a/T.n)/Math.sqrt(dv*T.d);
+}
+// best top-left within ±R of (bx,by): coarse pass on every 2nd pixel and offset, then refine
+function search(f,gw,gh,p,ts,bx,by,R){
+  const T2=stats(p,ts,2), T1=stats(p,ts,1);
+  let best=-2, mx=bx, my=by;
+  for(let dy=-R;dy<=R;dy+=2) for(let dx=-R;dx<=R;dx+=2){
+    const x0=bx+dx, y0=by+dy;
+    if(x0<0||y0<0||x0+ts>gw||y0+ts>gh) continue;
+    const sc=ncc(f,gw,p,ts,x0,y0,2,T2); if(sc>best){ best=sc; mx=x0; my=y0; } }
+  const cx=mx, cy=my; best=-2;
+  for(let dy=-2;dy<=2;dy++) for(let dx=-2;dx<=2;dx++){
+    const x0=cx+dx, y0=cy+dy;
+    if(x0<0||y0<0||x0+ts>gw||y0+ts>gh) continue;
+    const sc=ncc(f,gw,p,ts,x0,y0,1,T1); if(sc>best){ best=sc; mx=x0; my=y0; } }
+  return {x:mx,y:my,score:best};
+}
+// Ramer-Douglas-Peucker on (t,x,y): keep only the samples the path actually bends at
+function simplify(pts,tol){
+  if(pts.length<3) return pts.slice();
+  const keep=new Uint8Array(pts.length); keep[0]=keep[pts.length-1]=1;
+  const stack=[[0,pts.length-1]];
+  while(stack.length){
+    const [a,b]=stack.pop(); let worst=0, wi=-1;
+    for(let i=a+1;i<b;i++){
+      const u=(pts[i].t-pts[a].t)/Math.max(1e-6,pts[b].t-pts[a].t);
+      const ex=pts[a].x+(pts[b].x-pts[a].x)*u-pts[i].x, ey=pts[a].y+(pts[b].y-pts[a].y)*u-pts[i].y;
+      const e=Math.hypot(ex,ey); if(e>worst){ worst=e; wi=i; } }
+    if(worst>tol){ keep[wi]=1; stack.push([a,wi],[wi,b]); }
+  }
+  return pts.filter((_,i)=>keep[i]);
+}
+function smooth(pts,r){
+  return pts.map((p,i)=>{ let sx=0,sy=0,n=0;
+    for(let j=Math.max(0,i-r);j<=Math.min(pts.length-1,i+r);j++){ sx+=pts[j].x; sy+=pts[j].y; n++; }
+    return {t:p.t,x:sx/n,y:sy/n}; });
+}
+
+$('trk').onclick=async()=>{
+  if(!W) return;
+  if(tracking){ stopTrack=true; return; }
+  tracking=true; stopTrack=false; vid.pause(); $('play').textContent='▶';
+  $('trk').classList.add('on'); $('trk').textContent='stop (esc)';
+  pushUndo();
+  const S=Math.min(1,360/Math.min(W,H)), G=grabber(S);
+  const t0=vid.currentTime, start=at(t0);
+  const before=keys.filter(k=>k.t<t0-0.04), oldKeys=keys.map(k=>({...k}));
+  const ts=Math.max(8,Math.round(tgtSide()*S)), R=Math.max(10,Math.round(ts*0.6));
+  await seekTo(t0);
+  let f=G.grab();
+  // the patch has to sit inside the frame; remember how far the subject is from its centre
+  let bx=Math.max(0,Math.min(G.gw-ts,Math.round(start.x*S-ts/2)));
+  let by=Math.max(0,Math.min(G.gh-ts,Math.round(start.y*S-ts/2)));
+  const offX=start.x-(bx+ts/2)/S, offY=start.y-(by+ts/2)/S;
+  let tpl=cutPatch(f,G.gw,bx,by,ts);
+  const samples=[{t:t0,x:start.x,y:start.y}];
+  let why='';
+  if(stats(tpl,ts,1).d/(ts*ts)<4) why='the dashed square has no detail to lock onto — move it onto the subject or make it bigger';
+  for(let t=t0+STEP; !why && !stopTrack && t<vid.duration-1e-3; t+=STEP){
+    await seekTo(t); f=G.grab();
+    const m=search(f,G.gw,G.gh,tpl,ts,bx,by,R);
+    if(m.score<LOST){ why=`lost the subject at ${t.toFixed(2)}s — set a keyframe there and track again`; break; }
+    bx=m.x; by=m.y;
+    if(m.score>0.8){ const np=cutPatch(f,G.gw,bx,by,ts); for(let i=0;i<tpl.length;i++) tpl[i]=tpl[i]*0.92+np[i]*0.08; }
+    const sx=(bx+ts/2)/S+offX, sy=(by+ts/2)/S+offY;
+    tgt={x:sx,y:sy};
+    samples.push({t,x:clampX(sx),y:clampY(sy)});
+    keys=before.concat(samples); sel=-1;
+    if(samples.length%4===0){ renderKeys(); drawFilm(); }
+    say(`tracking ${t.toFixed(2)}s  match ${(m.score*100).toFixed(0)}%`);
+  }
+  // keep everything outside the tracked range; replace what was inside with a light set of keys
+  const tEnd=samples[samples.length-1].t;
+  const after=oldKeys.filter(k=>k.t>tEnd+0.04);
+  const tol=Math.max(2,Math.min(W,H)*0.006);
+  const simp=simplify(smooth(samples,2),tol).map(k=>({t:k.t,x:clampX(k.x),y:clampY(k.y)}));
+  simp[0]={t:t0,x:start.x,y:start.y};
+  keys=before.concat(simp,after); sel=-1; tgt=null;
+  tracking=false; $('trk').classList.remove('on'); $('trk').textContent='auto-track';
+  renderKeys(); drawFilm(); draw();
+  if(samples.length>1){
+    if($('interp').value==='ease') $('interp').value='spline';
+    say((why||(stopTrack?'stopped':'tracked to the end'))+`  ·  ${simp.length} keyframes over ${(tEnd-t0).toFixed(1)}s  (ctrl+z to undo)`);
+  } else { undoStack.pop(); say(why||'nothing to track from here'); }
+};
+
+/* ---------- import json ---------- */
+function readTrack(file){
+  file.text().then(t=>applyTrack(JSON.parse(t))).catch(e=>say('could not read '+file.name+': '+e.message));
+}
+$('imp').onclick=()=>{ if(!tracking) $('impf').click(); };
+$('impf').onchange=e=>{ const f=e.target.files[0]; if(f) readTrack(f); e.target.value=''; };
+function applyTrack(tr){
+  if(!tr||!Array.isArray(tr.keys)||!tr.keys.length) return say('that json has no keyframes');
+  if(!W){ pendingTrack=tr; return say('track loaded — now drop the video it belongs to'); }
+  pushUndo();
+  // coordinates are source pixels: rescale if this video is a different size (e.g. a proxy)
+  const sx=W/(+tr.width||W), sy=H/(+tr.height||H);
+  if(tr.aspect>0){
+    const opt=[...$('ar').options].find(o=>o.value!=='custom'&&Math.abs(+o.value-tr.aspect)<0.002);
+    if(opt) $('ar').value=opt.value;
+    else { $('ar').value='custom'; $('cw').value=+tr.aspect.toFixed(4); $('chh').value=1; }
+    $('cust').style.display=$('ar').value==='custom'?'flex':'none';
+  }
+  if(tr.zoom>0){ $('zoom').value=Math.round(Math.min(3,Math.max(1,tr.zoom))*100);
+    $('zoomv').textContent=(+$('zoom').value/100).toFixed(2)+'×'; }
+  $('interp').value=['spline','ease','linear'].includes(tr.interp)?tr.interp:(tr.ease===false?'linear':'ease');
+  cropSize();
+  keys=tr.keys.map(k=>({t:+k.t,x:clampX(k.x*sx),y:clampY(k.y*sy)})).sort((a,b)=>a.t-b.t);
+  sel=-1; layout(); renderKeys(); drawFilm(); draw();
+  say(`imported ${keys.length} keyframes`+(sx!==1||sy!==1?` (rescaled from ${tr.width}×${tr.height})`:''));
+}
+
 /* ---------- export ---------- */
 $('json').onclick=()=>{
   const b=new Blob([JSON.stringify({source:SRCNAME,width:W,height:H,
     crop:{w:cw,h:ch},aspect:aspect(),zoom:+$('zoom').value/100,
-    ease:$('ease').checked,
+    interp:$('interp').value, ease:$('interp').value!=='linear',
     keys:keys.map(k=>({t:+k.t.toFixed(3),x:Math.round(k.x),y:Math.round(k.y)}))},null,1)],
     {type:'application/json'});
   const a=document.createElement('a'); a.href=URL.createObjectURL(b);
@@ -355,7 +567,7 @@ $('json').onclick=()=>{
 };
 
 $('export').onclick=async()=>{
-  if(!W) return;
+  if(!W||tracking) return;
   const btn=$('export'); btn.disabled=true;
   const oh=$('size').value==='native'?ch:+$('size').value;
   const ow=Math.round(oh*cw/ch/2)*2;

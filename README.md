@@ -30,6 +30,9 @@ browser's own video decoder — there is no server, no upload, and no account.
 Three or four keyframes is usually a whole clip. You are marking the *corners*
 of the movement, not every frame.
 
+Or let it do the work: put the crop on the subject, then hit **auto-track**
+(or press **t**). See [Auto-track](#auto-track).
+
 ### A worked example
 
 A 20-second clip of someone walking left to right across the frame, going to 9:16:
@@ -45,6 +48,33 @@ still after `0:15`, because the last keyframe extends to the end of the clip.
 If the pan feels like it lags behind them, add one keyframe between the two it
 lags between — never more than that at a time.
 
+## Auto-track
+
+For subjects that move a lot, such as sport, pets, or anything handheld,
+hand-keyframing gets tedious. Auto-track follows the subject for you:
+
+1. Scrub to where you want tracking to start and drag the crop onto the subject.
+2. Adjust **target** so the dashed square covers something distinctive on the
+   subject, such as a face, a jersey, or a logo. Smaller is more precise; bigger
+   is more robust when the subject turns or blurs.
+3. Hit **auto-track** (or **t**). The crop follows live as it goes. **Esc** or
+   **stop** ends it early.
+
+It samples the clip 20 times a second and matches the dashed patch from frame to
+frame. Then it reduces that path to a light set of normal keyframes at the
+points where the motion actually bends, so you can fix any of them by hand
+afterwards. Keyframes before the start point are kept, and so are any after the
+point where tracking stopped. Everything in between is replaced. **ctrl+z**
+undoes the whole run.
+
+If the subject is hidden, leaves the frame, or changes too much, tracking stops
+and tells you the time instead of drifting onto the background. Scrub there,
+drag the crop back onto the subject, and track again from that point.
+
+Tracking runs at seek speed rather than playback speed: roughly 2–4× the clip's
+length, depending on the machine and the codec. Everything still happens
+locally.
+
 ## Controls
 
 Everything happens on the video frame and the timeline underneath it.
@@ -59,9 +89,12 @@ Everything happens on the video frame and the timeline underneath it.
 | **← →** | step back / forward 1/60 s (hold **shift** for ten steps) |
 | **k** | add a keyframe at the current time, at wherever the crop already is |
 | **⌫** / **delete** | delete the selected keyframe |
+| **t** | auto-track from the current time (**esc** stops it) |
+| **ctrl/⌘+z** | undo (**shift** to redo, or **ctrl+y**) |
 
 Buttons in the bar do the same jobs: **set keyframe**, **delete**, **clear all**
-(resets to a single centred keyframe), and the transport controls.
+(resets to a single centred keyframe), **↶ ↷** undo/redo, and the transport
+controls.
 
 A keyframe at `t=0` is created for you when the video loads, centred, so the
 crop is always defined for the whole clip. Dragging within ~0.04 s of an
@@ -77,8 +110,15 @@ The last remaining keyframe can't be deleted.
   1.00× a 9:16 crop of 16:9 footage is full height, so it can only pan
   sideways. Past 1.00× it has room to pan on *both* axes, which is what makes
   this a tracker rather than a horizontal pan.
-- **ease** — smoothstep between keyframes, on by default. Turning it off gives
-  linear motion, which reads more mechanical but is easier to match to a beat.
+- **motion**: how the crop travels between keyframes.
+  - **smooth** (default): one continuous curve through all the keys. It
+    flows through a key when the motion carries on in the same direction,
+    and eases to a stop only where the motion reverses or ends. It never
+    overshoots a keyframe.
+  - **ease each**: eases in and out of *every* keyframe, so the crop briefly
+    pauses at each one. This was the behaviour before **smooth** existed.
+  - **linear**: constant speed. It reads more mechanical, but it's easier to
+    match to a beat.
 - **height** — 1920, 1280 (default), 1080, or **native** (the crop's own pixel
   height, no resampling). Width follows from the aspect.
 - **fps** — 30 or 60, for the in-browser export.
@@ -119,8 +159,8 @@ python3 track_to_ffmpeg.py track.json input.mp4 output.mp4
 
 Needs `ffmpeg` on your PATH (`brew install ffmpeg`, `apt install ffmpeg`) and
 Python 3. It rebuilds the crop as an ffmpeg expression in `t`, interpolated the
-same way the page does it — smoothstep or linear, matching whatever **ease** was
-set to when you exported.
+same way the page does it, matching whatever **motion** was set to when you
+exported. Older `track.json` files that only have `"ease"` still work.
 
 ```
 --height N   output height (default: the crop's native height)
@@ -138,7 +178,7 @@ JSON stays meaningful at any output size:
   "source": "clip.mp4",
   "width": 1920, "height": 1080,
   "crop": { "w": 608, "h": 1080 },
-  "aspect": 0.5625, "zoom": 1, "ease": true,
+  "aspect": 0.5625, "zoom": 1, "interp": "spline", "ease": true,
   "keys": [
     { "t": 0,     "x": 304,  "y": 540 },
     { "t": 3.5,   "x": 960,  "y": 540 },
@@ -146,6 +186,15 @@ JSON stays meaningful at any output size:
   ]
 }
 ```
+
+### import json: resume or reuse a track
+
+**import json** (or dropping a `track.json` onto the page) restores the
+keyframes, aspect, zoom, and motion setting. Use it to pick up where you left
+off, or to apply one track to a different encode of the same footage. If the
+video is a different size, such as a half-resolution proxy, the keyframes are
+rescaled to fit. If you drop the JSON before the video, it's applied as soon as
+the video loads.
 
 ## Running it locally
 
