@@ -53,6 +53,8 @@
   #prog{display:none;align-items:center;gap:8px}
   #pbar{width:190px;height:6px;background:var(--panel2);border-radius:3px;overflow:hidden}
   #pfill{height:100%;width:0;background:var(--acc)}
+  #msg{color:var(--warn);font-size:11.5px}
+  #trk.on{background:var(--ok);border-color:var(--ok);color:#101017}
 </style>
 </head>
 <body>
@@ -85,7 +87,11 @@
     <button id="setkf">set keyframe</button>
     <button id="delkf">delete</button>
     <button id="clear">clear all</button>
-    <label>ease <input type="checkbox" id="ease" checked></label>
+    <button id="undo" title="undo (ctrl/⌘+z)">↶</button><button id="redo" title="redo (ctrl/⌘+shift+z)">↷</button>
+    <button id="trk" title="follow the subject automatically from the current time (t)">auto-track</button>
+    <label title="size of the patch the tracker locks onto (dashed square)">target
+      <input type="range" id="tsize" min="4" max="60" value="18"></label>
+    <span id="msg"></span>
     <span id="info"></span>
   </div>
 
@@ -108,9 +114,21 @@
       <option value="1920">1920</option><option value="1280" selected>1280</option>
       <option value="1080">1080</option><option value="native">native</option>
     </select></label>
+    <label title="how the camera follows the subject: hold still while it moves around inside the shot, or stay locked on it">camera <select id="camera">
+      <option value="follow">locked on</option>
+      <option value="smooth">smooth</option>
+      <option value="calm" selected>calm</option>
+      <option value="steady">steady</option>
+    </select></label>
+    <label>motion <select id="interp">
+      <option value="spline" selected>smooth</option>
+      <option value="ease">ease each</option>
+      <option value="linear">linear</option>
+    </select></label>
     <label>fps <select id="ofps"><option>60</option><option selected>30</option></select></label>
     <button id="export">export video</button>
     <button id="json">export json</button>
+    <button id="imp">import json</button><input type="file" id="impf" accept=".json,application/json" hidden>
     <div id="prog"><div id="pbar"><div id="pfill"></div></div><span id="ptxt"></span></div>
   </div>
 </div>
@@ -120,15 +138,20 @@ const $=id=>document.getElementById(id);
 const vid=$('src'), ov=$('ov'), out=$('out');
 let keys=[];                      // {t,x,y} subject centre in source pixels
 let sel=-1, W=0, H=0, cw=0, ch=0, dragging=false, SRCNAME='(none)';
+let tracking=false, stopTrack=false, tgt=null, pendingTrack=null, thumbs=[];
+const say=m=>{ $('msg').textContent=m||''; };
 
 /* ---------- load ---------- */
 function load(url,name){ SRCNAME=name||url; keys=[]; thumbs=[];
   vid.src=url; vid.load(); $('empty').style.display='none'; }
 $('file').onchange=e=>{ const f=e.target.files[0]; if(f) load(URL.createObjectURL(f),f.name); };
 addEventListener('dragover',e=>e.preventDefault());
-addEventListener('drop',e=>{ e.preventDefault();
-  const f=[...e.dataTransfer.files].find(x=>x.type.startsWith('video/'));
-  if(f) load(URL.createObjectURL(f),f.name); });
+addEventListener('drop',e=>{ e.preventDefault(); if(tracking) return;
+  const fs=[...e.dataTransfer.files];
+  const f=fs.find(x=>x.type.startsWith('video/'));
+  const j=fs.find(x=>x.name.toLowerCase().endsWith('.json'));
+  if(f) load(URL.createObjectURL(f),f.name);
+  if(j) readTrack(j); });
 vid.addEventListener('error',()=>{ $('empty').style.display='grid'; });
 // ?v=path loads a video straight from the server, handy for a fixed workflow
 const q=new URLSearchParams(location.search).get('v');
@@ -137,6 +160,8 @@ if(q) load(q,q.split('/').pop());
 vid.addEventListener('loadedmetadata',()=>{
   W=vid.videoWidth; H=vid.videoHeight; cropSize();
   if(!keys.length) keys=[{t:0,x:W/2,y:H/2}];
+  undoStack=[]; redoStack=[];
+  if(pendingTrack){ const p=pendingTrack; pendingTrack=null; applyTrack(p); }
   layout(); ticks(); renderKeys(); draw(); buildFilm(vid.currentSrc||vid.src);
 });
 
@@ -169,18 +194,103 @@ function layout(){
 addEventListener('resize',()=>{ if(W){layout(); drawFilm(); draw();} });
 
 /* ---------- interpolation ---------- */
+// Monotone cubic (Fritsch-Carlson) tangents. The ends are 0 so the crop holds
+// still outside the keyed range, and a key where the motion reverses gets 0 too,
+// so the crop never overshoots past where you put it. track_to_ffmpeg.py
+// computes exactly the same thing.
+function tangents(k,a){
+  const n=k.length, d=[], m=new Array(n).fill(0);
+  for(let i=0;i<n-1;i++) d.push((k[i+1][a]-k[i][a])/Math.max(1e-6,k[i+1].t-k[i].t));
+  for(let i=1;i<n-1;i++) if(d[i-1]*d[i]>0) m[i]=(d[i-1]+d[i])/2;
+  for(let i=0;i<n-1;i++){
+    if(d[i]===0){ m[i]=0; m[i+1]=0; continue; }
+    const al=m[i]/d[i], be=m[i+1]/d[i], s=al*al+be*be;
+    if(s>9){ const tau=3/Math.sqrt(s); m[i]=tau*al*d[i]; m[i+1]=tau*be*d[i]; }
+  }
+  return m;
+}
 function at(t){
   if(!keys.length) return {x:W/2,y:H/2};
-  const k=[...keys].sort((a,b)=>a.t-b.t);
-  if(t<=k[0].t) return k[0];
-  if(t>=k[k.length-1].t) return k[k.length-1];
-  for(let i=0;i<k.length-1;i++) if(t>=k[i].t&&t<=k[i+1].t){
-    let u=(t-k[i].t)/Math.max(1e-6,k[i+1].t-k[i].t);
-    if($('ease').checked) u=u*u*(3-2*u);
-    return {x:k[i].x+(k[i+1].x-k[i].x)*u, y:k[i].y+(k[i+1].y-k[i].y)*u};
+  const k=[...keys].sort((a,b)=>a.t-b.t), n=k.length;
+  if(t<=k[0].t) return {x:k[0].x,y:k[0].y};
+  if(t>=k[n-1].t) return {x:k[n-1].x,y:k[n-1].y};
+  let i=0; while(i<n-2&&t>k[i+1].t) i++;
+  const h=Math.max(1e-6,k[i+1].t-k[i].t), mode=$('interp').value;
+  let u=(t-k[i].t)/h;
+  if(mode==='spline'){
+    const mx=tangents(k,'x'), my=tangents(k,'y');
+    const u2=u*u, u3=u2*u, h00=2*u3-3*u2+1, h10=u3-2*u2+u, h01=-2*u3+3*u2, h11=u3-u2;
+    return { x:h00*k[i].x+h10*h*mx[i]+h01*k[i+1].x+h11*h*mx[i+1],
+             y:h00*k[i].y+h10*h*my[i]+h01*k[i+1].y+h11*h*my[i+1] };
   }
-  return k[k.length-1];
+  if(mode==='ease') u=u*u*(3-2*u);
+  return {x:k[i].x+(k[i+1].x-k[i].x)*u, y:k[i].y+(k[i+1].y-k[i].y)*u};
 }
+// Keys hold where the SUBJECT is, unclamped -- even on an axis the crop can't
+// pan. The crop is clamped into the frame only here, when it's drawn, so a
+// later zoom or aspect change still knows where the subject was.
+function crop(t){
+  const c=CAM[$('camera').value];
+  let p;
+  if(!c||tracking||!vid.duration) p=at(t);
+  else { const P=camPath(), f=Math.max(0,Math.min(P.xs.length-1,t/P.dt)), i=Math.floor(f),
+      j=Math.min(i+1,P.xs.length-1), u=f-i;
+    p={x:P.xs[i]+(P.xs[j]-P.xs[i])*u, y:P.ys[i]+(P.ys[j]-P.ys[i])*u}; }
+  return {x:clampX(p.x),y:clampY(p.y)};
+}
+
+/* ---------- camera ---------- */
+// The keys say where the SUBJECT is. The camera doesn't have to copy every move:
+// like an operator, it can hold still while the subject moves around inside the
+// shot and only pan when the subject nears the edge of a "zone" around centre.
+// Run that hold-until-pushed rule forwards and backwards in time and average
+// the two, so the camera moves ahead of the subject rather than lagging behind
+// it, then round off the starts and stops while keeping inside the zone.
+//   [zone: share of the free room each side of the subject, blur in seconds]
+const CAM={follow:null, smooth:[0.35,0.15], calm:[0.6,0.2], steady:[0.8,0.3]};
+const CDT=1/20;
+let camCache={sig:null};
+function gauss(a,sg){
+  const r=Math.ceil(sg*3), k=[]; for(let i=-r;i<=r;i++) k.push(Math.exp(-i*i/(2*sg*sg)));
+  const o=new Float64Array(a.length);
+  for(let i=0;i<a.length;i++){ let s=0,w=0;
+    for(let j=-r;j<=r;j++){ const q=i+j; if(q<0||q>=a.length) continue; s+=a[q]*k[j+r]; w+=k[j+r]; }
+    o[i]=s/w; }
+  return o;
+}
+function tube(s,m,sg){
+  const n=s.length, f=Float64Array.from(s), b=Float64Array.from(s);
+  if(m<=0||n<2) return f;
+  const keep=(prev,i)=>Math.max(s[i]-m,Math.min(s[i]+m,prev));   // hold until pushed
+  for(let i=1;i<n;i++) f[i]=keep(f[i-1],i);
+  for(let i=n-2;i>=0;i--) b[i]=keep(b[i+1],i);
+  let c=new Float64Array(n); for(let i=0;i<n;i++) c[i]=(f[i]+b[i])/2;
+  for(let it=0;it<8;it++){
+    c=gauss(c,sg);
+    for(let i=0;i<n;i++) c[i]=Math.max(s[i]-m,Math.min(s[i]+m,c[i]));
+  }
+  return c;
+}
+function camPath(){
+  let h=0; for(const k of keys) h=(h*31+k.t*1009+k.x*7+k.y*3)%1e9;
+  const sig=[h,keys.length,$('camera').value,$('interp').value,cw,ch,$('tsize').value,vid.duration].join('|');
+  if(camCache.sig===sig) return camCache;
+  const [zone,blur]=CAM[$('camera').value], n=Math.ceil(vid.duration/CDT)+1;
+  const sx=new Float64Array(n), sy=new Float64Array(n);
+  for(let i=0;i<n;i++){ const p=at(i*CDT); sx[i]=clampX(p.x); sy[i]=clampY(p.y); }
+  // room the subject can drift each side of centre while staying in shot
+  const half=tgtSide()/2, mx=zone*Math.max(0,cw/2-half), my=zone*Math.max(0,ch/2-half);
+  camCache={sig,dt:CDT, xs:W-cw>1?tube(sx,mx,blur/CDT):sx, ys:H-ch>1?tube(sy,my,blur/CDT):sy};
+  return camCache;
+}
+
+/* ---------- undo ---------- */
+let undoStack=[], redoStack=[];
+const snap=()=>JSON.stringify(keys);
+function pushUndo(){ undoStack.push(snap()); if(undoStack.length>200) undoStack.shift(); redoStack=[]; }
+function restore(s){ keys=JSON.parse(s); sel=-1; renderKeys(); drawFilm(); draw(); }
+function undo(){ if(tracking||!undoStack.length) return; redoStack.push(snap()); restore(undoStack.pop()); }
+function redo(){ if(tracking||!redoStack.length) return; undoStack.push(snap()); restore(redoStack.pop()); }
 function setKey(t,x,y){
   const i=keys.findIndex(k=>Math.abs(k.t-t)<0.04);
   if(i>=0){ keys[i].x=x; keys[i].y=y; sel=i; }
@@ -192,7 +302,7 @@ function setKey(t,x,y){
 const wrap=$('wrap');
 wrap.addEventListener('dragstart',e=>e.preventDefault());
 wrap.addEventListener('pointerdown',e=>{
-  if(!W) return; e.preventDefault(); dragging=true;
+  if(!W||tracking) return; e.preventDefault(); dragging=true; pushUndo();
   try{ wrap.setPointerCapture(e.pointerId); }catch(_){}
   pick(e); });
 wrap.addEventListener('pointermove',e=>{ if(dragging){ e.preventDefault(); pick(e); } });
@@ -202,8 +312,8 @@ wrap.addEventListener('pointercancel',endDrag);
 function pick(e){
   const r=vid.getBoundingClientRect();
   setKey(vid.currentTime,
-         clampX((e.clientX-r.left)/r.width*W),
-         clampY((e.clientY-r.top)/r.height*H));
+         Math.max(0,Math.min(W,(e.clientX-r.left)/r.width*W)),
+         Math.max(0,Math.min(H,(e.clientY-r.top)/r.height*H)));
   draw();
 }
 
@@ -211,15 +321,20 @@ function pick(e){
 function draw(){
   if(!W) return;
   const c=ov.getContext('2d'); c.clearRect(0,0,ov.width,ov.height);
-  const s=ov.width/W, p=at(vid.currentTime);
+  const s=ov.width/W, p=crop(vid.currentTime), q=at(vid.currentTime);
   const l=(p.x-cw/2)*s, t=(p.y-ch/2)*s, w=cw*s, h=ch*s;
   c.fillStyle='#000000a8';
   c.fillRect(0,0,ov.width,t); c.fillRect(0,t+h,ov.width,ov.height-t-h);
   c.fillRect(0,t,l,h); c.fillRect(l+w,t,ov.width-l-w,h);
   c.strokeStyle='#7fd6a0'; c.lineWidth=2; c.strokeRect(l+1,t+1,w-2,h-2);
   c.strokeStyle='#c8607a'; c.lineWidth=1.5;
-  c.beginPath(); c.moveTo(p.x*s,t); c.lineTo(p.x*s,t+h);
-  c.moveTo(l,p.y*s); c.lineTo(l+w,p.y*s); c.stroke();
+  // crosshair on the subject itself, which the crop may not be able to centre on
+  c.beginPath(); c.moveTo(q.x*s,t); c.lineTo(q.x*s,t+h);
+  c.moveTo(l,q.y*s); c.lineTo(l+w,q.y*s); c.stroke();
+  // the patch auto-track locks onto
+  const g=tgt||q, ts=tgtSide()*s;
+  c.setLineDash([5,4]); c.strokeStyle=tracking?'#7fd6a0':'#ffffff66'; c.lineWidth=1.5;
+  c.strokeRect(g.x*s-ts/2,g.y*s-ts/2,ts,ts); c.setLineDash([]);
   const o=out.getContext('2d');
   o.fillStyle='#000'; o.fillRect(0,0,cw,ch);
   try{ o.drawImage(vid, p.x-cw/2,p.y-ch/2,cw,ch, 0,0,cw,ch); }catch(_){}
@@ -227,12 +342,12 @@ function draw(){
   $('head').style.left=(vid.currentTime/d*100)+'%';
   $('played').style.width=(vid.currentTime/d*100)+'%';
   $('info').textContent=`${vid.currentTime.toFixed(2)} / ${(vid.duration||0).toFixed(2)}s   `
-    +`centre ${Math.round(p.x)},${Math.round(p.y)}   ${keys.length} keyframes`;
+    +`subject ${Math.round(q.x)},${Math.round(q.y)}   ${keys.length} keyframe${keys.length===1?'':'s'}`;
 }
 (function loop(){ draw(); requestAnimationFrame(loop); })();
 
 /* ---------- filmstrip + path curve ---------- */
-let thumbs=[];
+
 async function buildFilm(url){
   thumbs=[];
   const v=document.createElement('video');
@@ -268,8 +383,8 @@ function drawFilm(){
   const line=(get,col)=>{ c.strokeStyle=col; c.lineWidth=2; c.beginPath();
     for(let px=0;px<=w;px++){ const v2=get(px/w*vid.duration);
       px?c.lineTo(px,v2):c.moveTo(px,v2); } c.stroke(); };
-  if(W-cw>1) line(t=>h-((at(t).x-cw/2)/(W-cw))*(h-14)-7, '#7fd6a0');
-  if(H-ch>1) line(t=>h-((at(t).y-ch/2)/(H-ch))*(h-14)-7, '#c8607a');
+  if(W-cw>1) line(t=>h-((crop(t).x-cw/2)/(W-cw))*(h-14)-7, '#7fd6a0');
+  if(H-ch>1) line(t=>h-((crop(t).y-ch/2)/(H-ch))*(h-14)-7, '#c8607a');
 }
 
 /* ---------- timeline ---------- */
@@ -277,7 +392,7 @@ let scrub=false;
 const timeAt=e=>{ const r=$('track').getBoundingClientRect();
   return Math.max(0,Math.min(vid.duration||0,(e.clientX-r.left)/r.width*(vid.duration||0))); };
 $('track').addEventListener('pointerdown',e=>{
-  if(e.target.classList.contains('kf')||!W) return;
+  if(e.target.classList.contains('kf')||!W||tracking) return;
   e.preventDefault(); scrub=true;
   try{ $('track').setPointerCapture(e.pointerId); }catch(_){}
   vid.pause(); $('play').textContent='▶'; vid.currentTime=timeAt(e);
@@ -294,7 +409,8 @@ function renderKeys(){
     d.style.left=(k.t/(vid.duration||1)*100)+'%';
     d.title=`${k.t.toFixed(2)}s  ${Math.round(k.x)},${Math.round(k.y)}`;
     d.onpointerdown=ev=>{
-      ev.stopPropagation(); ev.preventDefault(); sel=i; vid.currentTime=k.t; renderKeys();
+      ev.stopPropagation(); ev.preventDefault(); if(tracking) return;
+      pushUndo(); sel=i; vid.currentTime=k.t; renderKeys();
       try{ d.setPointerCapture(ev.pointerId); }catch(_){}
       const move=m=>{ k.t=timeAt(m); vid.currentTime=k.t;
         keys.sort((a,b)=>a.t-b.t); sel=keys.indexOf(k); renderKeys(); drawFilm(); };
@@ -315,27 +431,35 @@ function ticks(){
 }
 
 /* ---------- transport ---------- */
-$('play').onclick=()=>{ if(!W) return;
+$('play').onclick=()=>{ if(!W||tracking) return;
   if(vid.paused){vid.play();$('play').textContent='❚❚';} else {vid.pause();$('play').textContent='▶';} };
 vid.addEventListener('ended',()=>$('play').textContent='▶');
-const stepF=d=>{ if(!W) return; vid.pause(); $('play').textContent='▶';
+const stepF=d=>{ if(!W||tracking) return; vid.pause(); $('play').textContent='▶';
   vid.currentTime=Math.max(0,Math.min(vid.duration,vid.currentTime+d/60)); };
 $('back').onclick=()=>stepF(-1); $('fwd').onclick=()=>stepF(1);
-$('setkf').onclick=()=>{ if(!W) return; const p=at(vid.currentTime);
-  setKey(vid.currentTime,p.x,p.y); draw(); };
-$('delkf').onclick=()=>{ if(sel>=0&&keys.length>1){ keys.splice(sel,1); sel=-1;
+$('setkf').onclick=()=>{ if(!W||tracking) return; const p=at(vid.currentTime);
+  pushUndo(); setKey(vid.currentTime,p.x,p.y); draw(); };
+$('delkf').onclick=()=>{ if(!tracking&&sel>=0&&keys.length>1){ pushUndo(); keys.splice(sel,1); sel=-1;
   renderKeys(); drawFilm(); draw(); } };
-$('clear').onclick=()=>{ keys=[{t:0,x:W/2,y:H/2}]; sel=-1; renderKeys(); drawFilm(); draw(); };
+$('clear').onclick=()=>{ if(!W||tracking) return; pushUndo();
+  keys=[{t:0,x:W/2,y:H/2}]; sel=-1; renderKeys(); drawFilm(); draw(); };
+$('undo').onclick=undo; $('redo').onclick=redo;
 ['ar','zoom','cw','chh'].forEach(id=>$(id).addEventListener('input',()=>{
   $('cust').style.display = $('ar').value==='custom' ? 'flex' : 'none';
   if(!W) return; cropSize();
   $('zoomv').textContent=(+$('zoom').value/100).toFixed(2)+'×';
-  keys.forEach(k=>{ k.x=clampX(k.x); k.y=clampY(k.y); });
   layout(); drawFilm(); draw();
 }));
-$('ease').addEventListener('change',()=>{ drawFilm(); draw(); });
+$('interp').addEventListener('change',()=>{ drawFilm(); draw(); });
+$('camera').addEventListener('change',()=>{ drawFilm(); draw(); });
 addEventListener('keydown',e=>{
   if(['INPUT','SELECT'].includes(e.target.tagName)) return;
+  if(e.key==='Escape'&&tracking){ stopTrack=true; return; }
+  if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='z'){ e.preventDefault(); e.shiftKey?redo():undo(); return; }
+  if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='y'){ e.preventDefault(); redo(); return; }
+  if(e.ctrlKey||e.metaKey||e.altKey) return;
+  if(e.key==='t'){ $('trk').click(); return; }
+  if(tracking) return;
   if(e.key===' '){e.preventDefault();$('play').click();}
   if(e.key==='ArrowLeft'){e.preventDefault();stepF(e.shiftKey?-10:-1);}
   if(e.key==='ArrowRight'){e.preventDefault();stepF(e.shiftKey?10:1);}
@@ -343,11 +467,277 @@ addEventListener('keydown',e=>{
   if(e.key==='Backspace'||e.key==='Delete'){$('delkf').click();}
 });
 
+/* ---------- auto-track ---------- */
+// Two ways of finding the subject in each frame, picked automatically:
+//  colour  -- when the subject's colours stand out from the scene (a red cloak,
+//             a team shirt, a ball). Learns which hues are far more common on the
+//             subject than around it and follows that blob. Copes with fast
+//             motion, pose changes and lighting shifts, and when the subject
+//             vanishes it searches the whole frame to pick it up again.
+//  pattern -- otherwise. Normalised cross-correlation on the dashed patch,
+//             checked against the subject's original look (and its mirror
+//             image) so it can't slide onto a static background or a HUD.
+// Either way it predicts where the subject is heading, coasts through short
+// flashes or occlusions, and gives up -- reporting the time -- rather than
+// following something else.
+const STEP=1/20;          // seconds between tracked samples
+const COAST=30;           // steps (1.5s) to coast before declaring it lost
+const tgtSide=()=>Math.max(8,Math.round(Math.min(W,H)*(+$('tsize').value/100)));
+$('tsize').addEventListener('input',draw);
+
+function seekTo(t){ return new Promise(res=>{
+  const done=()=>{ clearTimeout(to); res(); };
+  const to=setTimeout(()=>{ vid.removeEventListener('seeked',done); res(); },3000);
+  vid.addEventListener('seeked',done,{once:true}); vid.currentTime=t; }); }
+
+function grabber(short){
+  const S=Math.min(1,short/Math.min(W,H));
+  const gw=Math.max(16,Math.round(W*S)), gh=Math.max(16,Math.round(H*S));
+  const cv=document.createElement('canvas'); cv.width=gw; cv.height=gh;
+  const cx=cv.getContext('2d',{willReadFrequently:true});
+  return {S,gw,gh,grab(){ cx.drawImage(vid,0,0,gw,gh); return cx.getImageData(0,0,gw,gh).data; }};
+}
+
+/* --- colour locator --- */
+// 16 hue bins for coloured pixels (saturation ignored, so a colour keeps its bin
+// as the light changes), 8 brightness bins for greys
+const NB=24;
+function hueBins(d,n){
+  const b=new Uint8Array(n);
+  for(let i=0,j=0;j<n;i+=4,j++){
+    const r=d[i],g=d[i+1],bl=d[i+2], mx=Math.max(r,g,bl), dd=mx-Math.min(r,g,bl);
+    if(mx<40||dd<0.25*mx){ b[j]=16+(mx>>5); continue; }
+    const h= mx===r ? ((g-bl)/dd+6)%6 : mx===g ? (bl-r)/dd+2 : (r-g)/dd+4;
+    b[j]=Math.floor(h*60/22.5)%16;
+  }
+  return b;
+}
+function colourLocator(G,ts,bx,by){
+  const {gw,gh}=G, n=gw*gh;
+  let bins=hueBins(G.grab(),n);
+  const hist=(x0,y0,x1,y1,kern)=>{ const h=new Float64Array(NB); let s=0;
+    const cx=(x0+x1-1)/2, cy=(y0+y1-1)/2, r2=((x1-x0)/2)**2;
+    for(let y=y0;y<y1;y++) for(let x=x0;x<x1;x++){
+      const w=kern?Math.max(0,1-((x-cx)**2+(y-cy)**2)/r2):1; h[bins[y*gw+x]]+=w; s+=w; }
+    return {h,s}; };
+  // subject (centre-weighted) vs its surroundings vs the whole frame
+  const T=hist(bx,by,bx+ts,by+ts,true), F=hist(0,0,gw,gh,false);
+  const x0=Math.max(0,bx-ts), y0=Math.max(0,by-ts), x1=Math.min(gw,bx+2*ts), y1=Math.min(gh,by+2*ts);
+  const A=hist(x0,y0,x1,y1,false), B=hist(bx,by,bx+ts,by+ts,false), ringS=Math.max(1,A.s-B.s);
+  const table=new Float32Array(NB);
+  for(let k=0;k<NB;k++){
+    const pt=T.h[k]/T.s, pf=F.h[k]/F.s, pr=(A.h[k]-B.h[k])/ringS;
+    table[k]=pt>0?Math.min(1,Math.max(0,Math.log2(pt/(Math.max(pf,pr)+1e-9))/3)):0;
+  }
+  const I=new Float64Array((gw+1)*(gh+1)); let w=new Float32Array(n);
+  const integrate=()=>{ for(let j=0;j<n;j++) w[j]=table[bins[j]];
+    for(let y=0;y<gh;y++){ let row=0;
+      for(let x=0;x<gw;x++){ row+=w[y*gw+x]; I[(y+1)*(gw+1)+x+1]=I[y*(gw+1)+x+1]+row; } } };
+  const box=(x,y)=>I[(y+ts)*(gw+1)+x+ts]-I[y*(gw+1)+x+ts]-I[(y+ts)*(gw+1)+x]+I[y*(gw+1)+x];
+  const best=(xa,ya,xb,yb)=>{ let bs=-1,mx=xa,my=ya;
+    for(let y=ya;y<=yb;y++) for(let x=xa;x<=xb;x++){ const s=box(x,y); if(s>bs){ bs=s; mx=x; my=y; } }
+    return {x:mx,y:my,c:bs/(ts*ts)}; };
+  integrate();
+  const c0=box(bx,by)/(ts*ts);
+  let fm=0; for(let j=0;j<n;j++) fm+=w[j]; fm/=n;
+  const R=Math.round(0.25*Math.min(gw,gh));
+  return { distinct:c0/(fm+1e-6), c0,
+    locate(px,py){
+      bins=hueBins(G.grab(),n); integrate();
+      let m=best(Math.max(0,px-R),Math.max(0,py-R),Math.min(gw-ts,px+R),Math.min(gh-ts,py+R));
+      let ok=m.c>=0.4*c0;
+      if(!ok){ m=best(0,0,gw-ts,gh-ts); ok=m.c>=0.5*c0; }   // vanished: look everywhere
+      if(ok) for(let it=0;it<2;it++){           // mean-shift onto the colour's centroid
+        let s=0,sx=0,sy=0;
+        for(let y=0;y<ts;y++) for(let x=0;x<ts;x++){ const v=w[(m.y+y)*gw+m.x+x]; s+=v; sx+=v*x; sy+=v*y; }
+        if(s<=0) break;
+        m.x=Math.max(0,Math.min(gw-ts,Math.round(m.x+sx/s-(ts-1)/2)));
+        m.y=Math.max(0,Math.min(gh-ts,Math.round(m.y+sy/s-(ts-1)/2)));
+      }
+      return {x:m.x,y:m.y,ok,score:m.c/c0};
+    }};
+}
+
+/* --- pattern locator --- */
+// frames and patches as interleaved RGB floats; a row is 3*width long
+const LOST=0.6, DRIFT=0.4;
+const toRGB=d=>{ const o=new Float32Array(d.length/4*3);
+  for(let i=0,j=0;j<o.length;i+=4,j+=3){ o[j]=d[i]; o[j+1]=d[i+1]; o[j+2]=d[i+2]; } return o; };
+function cutPatch(f,gw,x0,y0,ts){
+  const p=new Float32Array(ts*ts*3), rl=ts*3;
+  for(let y=0;y<ts;y++) p.set(f.subarray(((y0+y)*gw+x0)*3,((y0+y)*gw+x0)*3+rl),y*rl);
+  return p;
+}
+function mirror(p,ts){
+  const q=new Float32Array(p.length);
+  for(let y=0;y<ts;y++) for(let x=0;x<ts;x++) for(let c=0;c<3;c++)
+    q[(y*ts+x)*3+c]=p[(y*ts+ts-1-x)*3+c];
+  return q;
+}
+function stats(p,ts,st){ let a=0,b=0,n=0;
+  for(let y=0;y<ts;y+=st) for(let x=0;x<ts;x+=st) for(let c=0;c<3;c++){
+    const v=p[(y*ts+x)*3+c]; a+=v; b+=v*v; n++; }
+  return {a,n,d:b-a*a/n}; }
+function ncc(f,gw,p,ts,x0,y0,st,T){
+  let sv=0,sv2=0,svt=0; const s3=st*3;
+  for(let y=0;y<ts;y+=st){ const r=((y0+y)*gw+x0)*3, q=y*ts*3;
+    for(let x=0;x<ts*3;x+=s3) for(let c=0;c<3;c++){
+      const v=f[r+x+c]; sv+=v; sv2+=v*v; svt+=v*p[q+x+c]; } }
+  const dv=sv2-sv*sv/T.n;
+  if(dv<1e-3||T.d<1e-3) return 0;
+  return (svt-sv*T.a/T.n)/Math.sqrt(dv*T.d);
+}
+// best top-left within ±R of (bx,by): coarse pass on every 2nd pixel and offset, then refine
+function search(f,gw,gh,p,ts,bx,by,R){
+  const T2=stats(p,ts,2), T1=stats(p,ts,1);
+  let best=-2, mx=bx, my=by;
+  for(let dy=-R;dy<=R;dy+=2) for(let dx=-R;dx<=R;dx+=2){
+    const x0=bx+dx, y0=by+dy;
+    if(x0<0||y0<0||x0+ts>gw||y0+ts>gh) continue;
+    const sc=ncc(f,gw,p,ts,x0,y0,2,T2); if(sc>best){ best=sc; mx=x0; my=y0; } }
+  const cx=mx, cy=my; best=-2;
+  for(let dy=-2;dy<=2;dy++) for(let dx=-2;dx<=2;dx++){
+    const x0=cx+dx, y0=cy+dy;
+    if(x0<0||y0<0||x0+ts>gw||y0+ts>gh) continue;
+    const sc=ncc(f,gw,p,ts,x0,y0,1,T1); if(sc>best){ best=sc; mx=x0; my=y0; } }
+  return {x:mx,y:my,score:best};
+}
+function patternLocator(G,ts,bx,by){
+  const {gw,gh}=G; let f=toRGB(G.grab());
+  let tpl=cutPatch(f,gw,bx,by,ts);
+  const orig=[tpl.slice(),mirror(tpl,ts)], origT=stats(orig[0],ts,1);
+  const R=Math.max(12,Math.round(ts*0.8));
+  return { flat:origT.d/(ts*ts*3)<4,
+    locate(px,py,miss){
+      f=toRGB(G.grab());
+      const m=search(f,gw,gh,tpl,ts,px,py,R+miss*Math.round(R/3));
+      const look=Math.max(ncc(f,gw,orig[0],ts,m.x,m.y,1,origT),ncc(f,gw,orig[1],ts,m.x,m.y,1,origT));
+      const ok=m.score>=LOST&&look>=DRIFT;
+      if(ok&&m.score>0.8){ const np=cutPatch(f,gw,m.x,m.y,ts); for(let i=0;i<tpl.length;i++) tpl[i]=tpl[i]*0.92+np[i]*0.08; }
+      return {x:m.x,y:m.y,ok,score:m.score};
+    }};
+}
+
+/* --- path clean-up --- */
+// Ramer-Douglas-Peucker on (t,x,y): keep only the samples the path actually bends at
+function simplify(pts,tol){
+  if(pts.length<3) return pts.slice();
+  const keep=new Uint8Array(pts.length); keep[0]=keep[pts.length-1]=1;
+  const stack=[[0,pts.length-1]];
+  while(stack.length){
+    const [a,b]=stack.pop(); let worst=0, wi=-1;
+    for(let i=a+1;i<b;i++){
+      const u=(pts[i].t-pts[a].t)/Math.max(1e-6,pts[b].t-pts[a].t);
+      const ex=pts[a].x+(pts[b].x-pts[a].x)*u-pts[i].x, ey=pts[a].y+(pts[b].y-pts[a].y)*u-pts[i].y;
+      const e=Math.hypot(ex,ey); if(e>worst){ worst=e; wi=i; } }
+    if(worst>tol){ keep[wi]=1; stack.push([a,wi],[wi,b]); }
+  }
+  return pts.filter((_,i)=>keep[i]);
+}
+function smooth(pts,r){
+  return pts.map((p,i)=>{ let sx=0,sy=0,n=0;
+    for(let j=Math.max(0,i-r);j<=Math.min(pts.length-1,i+r);j++){ sx+=pts[j].x; sy+=pts[j].y; n++; }
+    return {t:p.t,x:sx/n,y:sy/n}; });
+}
+
+$('trk').onclick=async()=>{
+  if(!W) return;
+  if(tracking){ stopTrack=true; return; }
+  tracking=true; stopTrack=false; vid.pause(); $('play').textContent='▶';
+  $('trk').classList.add('on'); $('trk').textContent='stop (esc)';
+  pushUndo();
+  const t0=vid.currentTime, start=at(t0);
+  const before=keys.filter(k=>k.t<t0-0.04), oldKeys=keys.map(k=>({...k}));
+  await seekTo(t0);
+  // the patch has to sit inside the frame; remember how far the subject is from its centre
+  const setup=G=>{ const ts=Math.max(6,Math.round(tgtSide()*G.S));
+    const bx=Math.max(0,Math.min(G.gw-ts,Math.round(start.x*G.S-ts/2)));
+    const by=Math.max(0,Math.min(G.gh-ts,Math.round(start.y*G.S-ts/2)));
+    return {G,ts,bx,by,offX:start.x-(bx+ts/2)/G.S,offY:start.y-(by+ts/2)/G.S}; };
+  let K=setup(grabber(180)), L=colourLocator(K.G,K.ts,K.bx,K.by), mode='colour';
+  if(!(L.c0>=0.2&&L.distinct>=6)){
+    K=setup(grabber(360)); L=patternLocator(K.G,K.ts,K.bx,K.by); mode='pattern'; }
+  const {G,ts,offX,offY}=K; let {bx,by}=K;
+  const samples=[{t:t0,x:start.x,y:start.y}];
+  let why='', vx=0, vy=0, miss=0, missT=0, n=0;
+  if(mode==='pattern'&&L.flat) why='the dashed square has no detail to lock onto — move it onto the subject or make it bigger';
+  for(let t=t0+STEP; !why && !stopTrack && t<vid.duration-1e-3; t+=STEP){
+    await seekTo(t);
+    // look where it's heading
+    const px=Math.max(0,Math.min(G.gw-ts,Math.round(bx+vx))), py=Math.max(0,Math.min(G.gh-ts,Math.round(by+vy)));
+    const m=L.locate(px,py,miss);
+    if(!m.ok){
+      if(!miss) missT=t;
+      if(++miss>COAST){ why=`lost the subject at ${missT.toFixed(2)}s — set a keyframe there and track again`; break; }
+      vx*=0.7; vy*=0.7; bx=px; by=py;
+      say(`tracking by ${mode} ${t.toFixed(2)}s  searching…`);
+      continue;
+    }
+    if(miss){ vx=vy=0; } else { vx=vx*0.5+(m.x-bx)*0.5; vy=vy*0.5+(m.y-by)*0.5; }
+    miss=0; bx=m.x; by=m.y;
+    const sx=(bx+ts/2)/G.S+offX, sy=(by+ts/2)/G.S+offY;
+    tgt={x:sx,y:sy};
+    samples.push({t,x:sx,y:sy});
+    keys=before.concat(samples); sel=-1;
+    if(++n%4===0){ renderKeys(); drawFilm(); }
+    say(`tracking by ${mode} ${t.toFixed(2)}s  match ${(m.score*100).toFixed(0)}%`);
+  }
+  // keep everything outside the tracked range; replace what was inside with a light set of keys
+  const tEnd=samples[samples.length-1].t;
+  const after=oldKeys.filter(k=>k.t>tEnd+0.04);
+  const tol=Math.max(2,Math.min(W,H)*0.012);
+  const simp=simplify(smooth(samples,3),tol);
+  simp[0]={t:t0,x:start.x,y:start.y};
+  keys=before.concat(simp,after); sel=-1; tgt=null;
+  tracking=false; $('trk').classList.remove('on'); $('trk').textContent='auto-track';
+  renderKeys(); drawFilm(); draw();
+  if(samples.length>1){
+    if($('interp').value==='ease') $('interp').value='spline';
+    say((why||(stopTrack?'stopped':'tracked to the end'))+`  ·  by ${mode}  ·  ${simp.length} keyframes over ${(tEnd-t0).toFixed(1)}s  (ctrl+z to undo)`);
+  } else { undoStack.pop(); say(why||'nothing to track from here'); }
+};
+
+/* ---------- import json ---------- */
+function readTrack(file){
+  file.text().then(t=>applyTrack(JSON.parse(t))).catch(e=>say('could not read '+file.name+': '+e.message));
+}
+$('imp').onclick=()=>{ if(!tracking) $('impf').click(); };
+$('impf').onchange=e=>{ const f=e.target.files[0]; if(f) readTrack(f); e.target.value=''; };
+function applyTrack(tr){
+  if(!tr||!Array.isArray(tr.keys)||!tr.keys.length) return say('that json has no keyframes');
+  if(!W){ pendingTrack=tr; return say('track loaded — now drop the video it belongs to'); }
+  pushUndo();
+  // coordinates are source pixels: rescale if this video is a different size (e.g. a proxy)
+  const sx=W/(+tr.width||W), sy=H/(+tr.height||H);
+  if(tr.aspect>0){
+    const opt=[...$('ar').options].find(o=>o.value!=='custom'&&Math.abs(+o.value-tr.aspect)<0.002);
+    if(opt) $('ar').value=opt.value;
+    else { $('ar').value='custom'; $('cw').value=+tr.aspect.toFixed(4); $('chh').value=1; }
+    $('cust').style.display=$('ar').value==='custom'?'flex':'none';
+  }
+  if(tr.zoom>0){ $('zoom').value=Math.round(Math.min(3,Math.max(1,tr.zoom))*100);
+    $('zoomv').textContent=(+$('zoom').value/100).toFixed(2)+'×'; }
+  $('interp').value=['spline','ease','linear'].includes(tr.interp)?tr.interp:(tr.ease===false?'linear':'ease');
+  if(tr.camera in CAM) $('camera').value=tr.camera;
+  cropSize();
+  keys=tr.keys.map(k=>({t:+k.t,x:k.x*sx,y:k.y*sy})).sort((a,b)=>a.t-b.t);
+  sel=-1; layout(); renderKeys(); drawFilm(); draw();
+  say(`imported ${keys.length} keyframes`+(sx!==1||sy!==1?` (rescaled from ${tr.width}×${tr.height})`:''));
+}
+
 /* ---------- export ---------- */
+// the camera path as linear keys (null when locked on): what track_to_ffmpeg.py renders
+function cameraKeys(){
+  if(!CAM[$('camera').value]||!vid.duration) return null;
+  const P=camPath(), pts=[];
+  for(let i=0;i<P.xs.length;i++) pts.push({t:Math.min(i*P.dt,vid.duration),x:clampX(P.xs[i]),y:clampY(P.ys[i])});
+  return simplify(pts,0.4).map(k=>({t:+k.t.toFixed(3),x:+k.x.toFixed(1),y:+k.y.toFixed(1)}));
+}
 $('json').onclick=()=>{
   const b=new Blob([JSON.stringify({source:SRCNAME,width:W,height:H,
     crop:{w:cw,h:ch},aspect:aspect(),zoom:+$('zoom').value/100,
-    ease:$('ease').checked,
+    interp:$('interp').value, ease:$('interp').value!=='linear',
+    camera:$('camera').value, cameraPath:cameraKeys(),
     keys:keys.map(k=>({t:+k.t.toFixed(3),x:Math.round(k.x),y:Math.round(k.y)}))},null,1)],
     {type:'application/json'});
   const a=document.createElement('a'); a.href=URL.createObjectURL(b);
@@ -355,7 +745,7 @@ $('json').onclick=()=>{
 };
 
 $('export').onclick=async()=>{
-  if(!W) return;
+  if(!W||tracking) return;
   const btn=$('export'); btn.disabled=true;
   const oh=$('size').value==='native'?ch:+$('size').value;
   const ow=Math.round(oh*cw/ch/2)*2;
@@ -379,7 +769,7 @@ $('export').onclick=async()=>{
   const t0=performance.now();
   (function pump(){
     if(vid.ended||vid.paused) return;
-    const p=at(vid.currentTime);
+    const p=crop(vid.currentTime);
     cx.fillStyle='#000'; cx.fillRect(0,0,cv.width,cv.height);
     cx.drawImage(vid, p.x-cw/2,p.y-ch/2,cw,ch, 0,0,cv.width,cv.height);
     const f=vid.currentTime/vid.duration;
