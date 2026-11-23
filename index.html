@@ -2,134 +2,365 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>Object Tracker — reframe video by keyframing a subject</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Object Tracker</title>
+<meta name="description" content="Reframe a video to vertical or square by tracking a subject. Runs entirely in your browser.">
 <style>
-  :root{ --bg:#101017; --panel:#191922; --panel2:#232330; --line:#33333f;
-         --txt:#e6e6ef; --dim:#8b8b9e; --acc:#c8607a; --ok:#7fd6a0; --warn:#d8a14a; }
+  :root{
+    --bg:#0c0d11; --panel:#14161b; --panel2:#1a1d23; --panel3:#23272f; --line:#262a33; --line2:#343945;
+    --txt:#eceef3; --dim:#9097a6; --faint:#5f6676;
+    --acc:#ff5d7d; --acc2:#ff7892; --ok:#4fd69c; --warn:#f2b45a;
+  }
   *{box-sizing:border-box}
-  html,body{margin:0;height:100%;background:var(--bg);color:var(--txt);overflow:hidden;
-    font:13px/1.5 ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif}
+  html,body{margin:0;height:100%;background:var(--bg);color:var(--txt);
+    font:13px/1.45 ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+    -webkit-font-smoothing:antialiased}
+  body{overflow:hidden}
   button,select,input{font:inherit;color:inherit}
-  button,select{background:var(--panel2);border:1px solid var(--line);border-radius:6px;
-    padding:5px 10px;cursor:pointer}
-  button:hover{background:#2e2e3d;border-color:#4a4a5c}
-  button.on{background:var(--acc);border-color:var(--acc);color:#fff}
-  button:disabled{opacity:.4;cursor:default}
-  #app{display:grid;grid-template-rows:1fr auto auto auto;height:100%}
-  #stage{position:relative;min-height:0;display:flex;gap:14px;padding:14px;justify-content:center}
-  #wrap{position:relative;min-width:0;touch-action:none;user-select:none}
-  #src{display:block;max-width:100%;max-height:100%;cursor:crosshair;
-    user-select:none;-webkit-user-drag:none;-webkit-user-select:none}
+  [hidden]{display:none!important}
+
+  /* ---- controls ---- */
+  .btn{display:inline-flex;align-items:center;justify-content:center;gap:7px;height:32px;padding:0 12px;
+    border-radius:8px;background:var(--panel3);border:1px solid var(--line2);cursor:pointer;white-space:nowrap;
+    transition:background .12s,border-color .12s,opacity .12s}
+  .btn:hover{background:#2c313b;border-color:#474d5b}
+  .btn:disabled{opacity:.38;cursor:default}
+  .btn.primary{background:var(--acc);border-color:var(--acc);color:#fff;font-weight:600}
+  .btn.primary:hover{background:var(--acc2);border-color:var(--acc2)}
+  .btn.stop{background:var(--ok);border-color:var(--ok);color:#0c0d11}
+  .btn.ghost{background:transparent;border-color:transparent;color:var(--dim)}
+  .btn.ghost:hover{background:var(--panel3);color:var(--txt)}
+  .btn.icon{width:32px;padding:0}
+  .btn.big{height:42px;font-size:14px;width:100%}
+  .btn svg{width:16px;height:16px;flex:none;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
+  .btn svg.fill{fill:currentColor;stroke:none}
+  kbd{font:10.5px ui-monospace,SFMono-Regular,Menlo,monospace;padding:1px 5px;border-radius:4px;
+    background:#ffffff12;border:1px solid #ffffff1c;color:var(--dim)}
+  .btn.primary kbd,.btn.stop kbd{background:#ffffff2e;border-color:#ffffff40;color:inherit}
+  .sel{height:32px;width:100%;border-radius:8px;background:var(--panel3);border:1px solid var(--line2);padding:0 8px;cursor:pointer}
+  input[type=number]{height:32px;width:64px;border-radius:8px;background:var(--panel3);border:1px solid var(--line2);padding:0 8px}
+  input[type=range]{width:100%;accent-color:var(--acc)}
+  .seg{display:grid;grid-auto-flow:column;grid-auto-columns:1fr;background:var(--panel);border:1px solid var(--line);
+    border-radius:9px;padding:3px;gap:2px}
+  .seg button{height:28px;border:0;border-radius:6px;background:transparent;color:var(--dim);cursor:pointer;font-size:12.5px}
+  .seg button:hover{color:var(--txt);background:#ffffff08}
+  .seg button.on{background:var(--panel3);color:var(--txt);box-shadow:0 1px 2px #0006,inset 0 0 0 1px var(--line2)}
+
+  /* ---- layout ---- */
+  #app{display:grid;height:100%;grid-template-columns:minmax(0,1fr) 300px;grid-template-rows:54px minmax(0,1fr) auto;
+    grid-template-areas:"head head" "stage panel" "foot panel"}
+  header{grid-area:head;display:flex;align-items:center;gap:14px;padding:0 14px 0 18px;background:var(--panel);
+    border-bottom:1px solid var(--line)}
+  .brand{display:flex;align-items:center;gap:9px;font-weight:700;font-size:14px;letter-spacing:.1px}
+  .brand i{width:18px;height:18px;border-radius:5px;border:2px solid var(--acc);position:relative}
+  .brand i:after{content:'';position:absolute;inset:4px;border-radius:2px;background:var(--acc)}
+  #steps{display:flex;align-items:center;gap:2px;list-style:none;margin:0 auto;padding:0}
+  #steps li{display:flex;align-items:center;gap:7px;padding:4px 11px 4px 5px;border-radius:999px;color:var(--faint);font-size:12.5px}
+  #steps li b{width:20px;height:20px;border-radius:50%;display:grid;place-items:center;font-size:11px;
+    background:var(--panel3);color:var(--faint)}
+  #steps li.done{color:var(--dim)}
+  #steps li.done b{background:#4fd69c22;color:var(--ok)}
+  #steps li.cur{color:var(--txt);background:var(--panel3)}
+  #steps li.cur b{background:var(--acc);color:#fff}
+  #steps .sep{width:14px;height:1px;background:var(--line2)}
+  .hdr-r{display:flex;gap:6px}
+
+  #stage{grid-area:stage;position:relative;min-height:0;min-width:0;display:flex;align-items:center;justify-content:center;
+    gap:18px;padding:18px;background:radial-gradient(ellipse at 50% 40%,#171a21 0%,var(--bg) 70%)}
+  #wrap{position:relative;flex:none;touch-action:none;user-select:none;cursor:crosshair;border-radius:6px;
+    box-shadow:0 8px 30px #0008}
+  #wrap.over{cursor:move}
+  #src{display:block;border-radius:6px;user-select:none;-webkit-user-drag:none;-webkit-user-select:none}
   #ov{position:absolute;inset:0;pointer-events:none}
-  #outwrap{position:relative;flex:none}
-  #out{display:block;height:100%;border:1px solid var(--line);border-radius:4px;background:#000}
-  .tag{position:absolute;top:6px;left:8px;font-size:11px;color:#ffffff55;pointer-events:none}
-  #empty{position:absolute;inset:0;display:grid;place-items:center;background:#101017f2;
-    text-align:center;color:var(--dim);z-index:5}
-  #empty b{color:var(--txt);font-size:17px}
-  #empty p{max-width:420px;margin:8px auto 0;font-size:12.5px;line-height:1.65}
+  #ftrack{position:absolute;height:28px;padding:0 10px;font-size:12px;border-radius:7px;box-shadow:0 4px 14px #0009;
+    pointer-events:auto;cursor:pointer;z-index:2}
+  #outwrap{flex:none;display:flex;flex-direction:column;gap:7px}
+  .cap{font-size:11px;color:var(--dim);display:flex;justify-content:space-between;gap:8px;letter-spacing:.2px}
+  .cap b{color:var(--txt);font-weight:600}
+  #out{display:block;border-radius:6px;background:#000;box-shadow:0 8px 30px #0008,0 0 0 1px var(--line2)}
+  #srccap{position:absolute;left:0;right:0;top:-20px}
+  #hint{position:absolute;top:12px;left:50%;transform:translateX(-50%);z-index:3;pointer-events:none;
+    background:#0c0d11d9;border:1px solid var(--line2);backdrop-filter:blur(6px);border-radius:999px;padding:6px 14px;
+    font-size:12.5px;white-space:nowrap;max-width:calc(100% - 24px);overflow:hidden;text-overflow:ellipsis;transition:opacity .2s}
+  #hint:empty{opacity:0}
+  #hint.go{border-color:#ff5d7d88}
+  #toasts{position:absolute;left:50%;bottom:16px;transform:translateX(-50%);display:flex;flex-direction:column;
+    align-items:center;gap:8px;z-index:4;pointer-events:none;width:max-content;max-width:calc(100% - 32px)}
+  .toast{pointer-events:auto;display:flex;align-items:center;gap:12px;background:var(--panel3);border:1px solid var(--line2);
+    border-radius:10px;padding:9px 10px 9px 14px;box-shadow:0 10px 30px #000a;animation:tin .18s ease-out;font-size:12.5px}
+  .toast.warn{border-color:#f2b45a77}
+  .toast.good{border-color:#4fd69c66}
+  .toast .x{color:var(--faint);cursor:pointer;padding:0 4px}
+  @keyframes tin{from{opacity:0;transform:translateY(6px)}}
 
-  #tl{background:var(--panel);border-top:1px solid var(--line);padding:10px 14px 4px}
-  #track{position:relative;height:84px;background:#12121a;border:1px solid var(--line);
-    border-radius:5px;cursor:ew-resize;overflow:hidden;touch-action:none}
+  #empty{position:absolute;inset:0;display:grid;place-items:center;padding:20px;z-index:5;background:var(--bg)}
+  .card{max-width:560px;width:100%;text-align:center;padding:38px 30px 30px;border:1.5px dashed var(--line2);border-radius:18px;
+    background:#ffffff04;transition:border-color .15s,background .15s}
+  body.dropping .card{border-color:var(--acc);background:#ff5d7d0d}
+  .card h1{font-size:21px;margin:14px 0 6px;letter-spacing:-.2px}
+  .card .lead{color:var(--dim);margin:0 auto 22px;max-width:400px;font-size:13.5px}
+  .card .big-ico{width:52px;height:52px;margin:0 auto;border-radius:14px;display:grid;place-items:center;
+    background:#ff5d7d1a;color:var(--acc)}
+  .card .big-ico svg{width:26px;height:26px;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
+  .three{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin:26px 0 16px;text-align:left}
+  .three div{background:var(--panel);border:1px solid var(--line);border-radius:11px;padding:12px;font-size:12px;color:var(--dim)}
+  .three b{display:flex;align-items:center;gap:7px;color:var(--txt);margin-bottom:4px;font-size:12.5px}
+  .three b span{width:18px;height:18px;border-radius:50%;display:grid;place-items:center;font-size:10.5px;background:var(--panel3)}
+  .fine{color:var(--faint);font-size:11.5px;margin:0}
+
+  /* ---- side panel ---- */
+  #panel{grid-area:panel;background:var(--panel);border-left:1px solid var(--line);overflow:auto;padding:4px 16px 16px}
+  #panel section{padding:16px 0;border-bottom:1px solid var(--line)}
+  #panel section:last-child{border-bottom:0}
+  #panel h3{margin:0 0 12px;font-size:11px;text-transform:uppercase;letter-spacing:.9px;color:var(--dim);font-weight:600;
+    display:flex;align-items:center;justify-content:space-between}
+  .lab{display:flex;justify-content:space-between;color:var(--dim);font-size:12px;margin:14px 0 6px}
+  .lab:first-of-type{margin-top:0}
+  .lab span{color:var(--txt);font-variant-numeric:tabular-nums}
+  .row{display:flex;gap:6px;align-items:center}
+  .row>*{flex:1}
+  .muted{color:var(--dim)}
+  .small{font-size:11.5px;line-height:1.5}
+  p.small{margin:10px 0 0}
+  .pill{font-size:11px;letter-spacing:0;text-transform:none;color:var(--txt);background:var(--panel3);border-radius:999px;padding:1px 8px}
+  #subj{display:flex;gap:10px;align-items:center;background:var(--panel2);border:1px solid var(--line);border-radius:10px;
+    padding:10px;margin-bottom:10px}
+  #subj canvas{width:46px;height:46px;border-radius:7px;background:#000;flex:none;object-fit:contain}
+  #subj .t1{font-weight:600}
+  #subj .t2{color:var(--dim);font-size:11.5px}
+  #subj.none canvas{background:repeating-linear-gradient(45deg,#1f232b 0 6px,#191c22 6px 12px)}
+  .meter{height:5px;border-radius:3px;background:var(--panel3);overflow:hidden;margin-top:10px}
+  .meter i{display:block;height:100%;width:0;background:var(--ok);transition:width .15s}
+  details summary{cursor:pointer;color:var(--dim);font-size:12px;margin-top:12px;list-style:none}
+  details summary::-webkit-details-marker{display:none}
+  details summary:before{content:'▸ ';}
+  details[open] summary:before{content:'▾ ';}
+
+  /* ---- transport + timeline ---- */
+  #foot{grid-area:foot;background:var(--panel);border-top:1px solid var(--line);padding:9px 16px 10px}
+  .transport{display:flex;align-items:center;gap:4px;margin-bottom:8px}
+  #time{margin-left:10px;font-variant-numeric:tabular-nums;color:var(--dim);font-size:12.5px}
+  #time b{color:var(--txt);font-weight:500}
+  .transport .spacer{flex:1}
+  #track{position:relative;height:62px;background:#101217;border:1px solid var(--line);border-radius:8px;
+    cursor:ew-resize;overflow:hidden;touch-action:none}
   #film{position:absolute;inset:0;width:100%;height:100%}
-  #played{position:absolute;top:0;bottom:0;left:0;background:#c8607a14;pointer-events:none}
-  #head{position:absolute;top:0;bottom:0;width:2px;background:var(--ok);pointer-events:none;
-    box-shadow:0 0 6px #7fd6a0aa}
+  #played{position:absolute;top:0;bottom:0;left:0;background:#ffffff08;pointer-events:none}
+  #head{position:absolute;top:0;bottom:0;width:2px;margin-left:-1px;background:#fff;pointer-events:none;box-shadow:0 0 6px #fff8}
   .kf{position:absolute;top:0;bottom:0;width:15px;margin-left:-7.5px;cursor:grab;touch-action:none}
-  .kf:after{content:'';position:absolute;left:6px;top:0;width:3px;bottom:0;
-    background:var(--warn);border-radius:2px;box-shadow:0 0 5px #d8a14a99}
-  .kf:before{content:'';position:absolute;left:2.5px;top:-1px;width:10px;height:10px;
-    background:var(--warn);border-radius:2px;transform:rotate(45deg)}
-  .kf.sel:after,.kf.sel:before{background:#fff}
-  #ticks{position:relative;height:16px;color:var(--dim);font-size:10px}
+  .kf:after{content:'';position:absolute;left:6.5px;top:0;width:2px;bottom:0;background:var(--warn);opacity:.75}
+  .kf:before{content:'';position:absolute;left:3px;top:3px;width:9px;height:9px;background:var(--warn);border-radius:2px;transform:rotate(45deg)}
+  .kf.dense{width:7px;margin-left:-3.5px}
+  .kf.dense:before{display:none}
+  .kf.dense:after{left:3px;width:1px;opacity:.45}
+  .kf.sel:after,.kf.sel:before{background:#fff;opacity:1}
+  #ticks{position:relative;height:15px;color:var(--faint);font-size:10px;margin-top:3px}
   #ticks span{position:absolute;transform:translateX(-50%)}
+  .legend{display:flex;gap:12px;color:var(--faint);font-size:11px}
+  .legend i{display:inline-block;width:10px;height:2px;vertical-align:middle;margin-right:4px}
 
-  .bar{background:var(--panel);padding:9px 14px;display:flex;gap:10px;align-items:center;
-    flex-wrap:wrap;border-top:1px solid #26262f}
-  .bar label{color:var(--dim);font-size:11.5px;display:flex;gap:5px;align-items:center}
-  input[type=range]{width:96px;accent-color:var(--acc)}
-  #info{color:var(--dim);font-size:11.5px;margin-left:auto;font-variant-numeric:tabular-nums}
-  #prog{display:none;align-items:center;gap:8px}
-  #pbar{width:190px;height:6px;background:var(--panel2);border-radius:3px;overflow:hidden}
-  #pfill{height:100%;width:0;background:var(--acc)}
-  #msg{color:var(--warn);font-size:11.5px}
-  #trk.on{background:var(--ok);border-color:var(--ok);color:#101017}
+  body:not(.loaded) #panel>*,body:not(.loaded) #foot{opacity:.35;pointer-events:none}
+
+  /* ---- help ---- */
+  #helpm{position:fixed;inset:0;background:#000b;display:grid;place-items:center;z-index:20;padding:20px}
+  .modal{background:var(--panel);border:1px solid var(--line2);border-radius:14px;max-width:560px;width:100%;padding:22px 24px;
+    box-shadow:0 20px 60px #000c;max-height:100%;overflow:auto}
+  .modal h2{margin:0 0 4px;font-size:17px}
+  .modal h4{margin:18px 0 8px;font-size:11px;text-transform:uppercase;letter-spacing:.9px;color:var(--dim)}
+  .modal ol{margin:0;padding-left:18px;color:var(--dim)} .modal ol b{color:var(--txt)}
+  .modal ol li{margin:4px 0}
+  .keys{display:grid;grid-template-columns:auto 1fr;gap:7px 14px;align-items:center;font-size:12.5px;color:var(--dim)}
+  .keys span:nth-child(odd){text-align:right}
+
+  @media (max-width:880px){
+    body{overflow:auto}
+    #app{height:auto;min-height:100%;grid-template-columns:minmax(0,1fr);
+      grid-template-rows:54px 62vh auto auto;grid-template-areas:"head" "stage" "foot" "panel"}
+    #steps{display:none}
+    #panel{border-left:0;border-top:1px solid var(--line)}
+    .three{grid-template-columns:1fr}
+    .hdr-r .lbl{display:none}
+    #stage{flex-direction:column;gap:12px;padding:14px}
+    #hint{top:8px}
+    .legend{display:none}
+    #time{margin-left:4px}
+  }
 </style>
 </head>
 <body>
+<svg width="0" height="0" style="position:absolute">
+  <symbol id="i-play" viewBox="0 0 24 24"><path d="M7 4.5v15l12-7.5z"/></symbol>
+  <symbol id="i-pause" viewBox="0 0 24 24"><path d="M7 4h3.5v16H7zM13.5 4H17v16h-3.5z"/></symbol>
+  <symbol id="i-stop" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2"/></symbol>
+</svg>
 <div id="app">
-  <div id="stage">
+  <header>
+    <div class="brand"><i></i>Object Tracker</div>
+    <ol id="steps">
+      <li data-s="open"><b>1</b>Open video</li><span class="sep"></span>
+      <li data-s="select"><b>2</b>Select subject</li><span class="sep"></span>
+      <li data-s="track"><b>3</b>Track</li><span class="sep"></span>
+      <li data-s="export"><b>4</b>Export</li>
+    </ol>
+    <div class="hdr-r">
+      <button class="btn" id="open" title="Open a video (O)">
+        <svg viewBox="0 0 24 24"><path d="M12 16V4M7 9l5-5 5 5M4 16v3a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-3"/></svg><span class="lbl">Open video</span></button>
+      <button class="btn icon ghost" id="helpb" title="How it works and shortcuts (?)">
+        <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M9.6 9.3a2.5 2.5 0 0 1 4.8.9c0 1.7-2.4 2.2-2.4 3.6M12 17h.01"/></svg></button>
+    </div>
+    <input type="file" id="file" accept="video/*" hidden>
+  </header>
+
+  <main id="stage">
     <div id="wrap">
       <video id="src" playsinline></video>
       <canvas id="ov"></canvas>
-      <div class="tag">drag on the frame to put the crop on your subject</div>
+      <button class="btn primary" id="ftrack" hidden><svg class="fill" viewBox="0 0 24 24"><use href="#i-play"/></svg>Track</button>
     </div>
-    <div id="outwrap"><canvas id="out"></canvas><div class="tag" id="artag"></div></div>
+    <div id="outwrap">
+      <div class="cap"><b>Preview</b><span id="artag"></span></div>
+      <canvas id="out"></canvas>
+    </div>
+    <div id="hint"></div>
+    <div id="toasts"></div>
     <div id="empty">
-      <div>
-        <b>Drop a video here</b>
-        <p>Keyframe where the subject is at a few moments; the crop glides between them.
-           Nothing is uploaded — the file is read locally by the browser.</p>
+      <div class="card">
+        <div class="big-ico"><svg viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="2"/><rect x="9" y="8" width="6" height="8" rx="1"/></svg></div>
+        <h1>Reframe a video around its subject</h1>
+        <p class="lead">Turn landscape footage into vertical, square or any shape, with the crop following the person or thing you pick.</p>
+        <button class="btn primary big" id="pick" style="max-width:240px">Choose a video</button>
+        <p class="fine" style="margin-top:10px">or drop one anywhere on this page</p>
+        <div class="three">
+          <div><b><span>1</span>Box the subject</b>Drag a box around what you want to follow.</div>
+          <div><b><span>2</span>Track it</b>It follows the subject through the clip for you.</div>
+          <div><b><span>3</span>Export</b>Pick a shape and camera style, then save.</div>
+        </div>
+        <p class="fine">Your video never leaves your computer. There's no upload and no account.</p>
       </div>
     </div>
-  </div>
+  </main>
 
-  <div id="tl">
+  <aside id="panel">
+    <section>
+      <h3>Subject</h3>
+      <div id="subj" class="none">
+        <canvas id="thumb" width="92" height="92"></canvas>
+        <div><div class="t1" id="subjT1">Nothing selected</div><div class="t2" id="subjT2">Drag a box around it on the video</div></div>
+      </div>
+      <button class="btn primary big" id="trk"><svg class="fill" viewBox="0 0 24 24"><use href="#i-play"/></svg><span id="trkLabel">Track subject</span><kbd id="trkKey">T</kbd></button>
+      <div id="tprog" hidden><div class="meter"><i id="tfill"></i></div><p class="small muted" id="ttxt"></p></div>
+      <p class="small muted">Follows it forward from the playhead. If it goes wrong somewhere, box the subject at that moment and track again from there.</p>
+    </section>
+
+    <section>
+      <h3>Framing</h3>
+      <div class="lab">Shape</div>
+      <div class="seg" id="arseg">
+        <button data-v="0.5625">9:16</button><button data-v="0.8">4:5</button><button data-v="1">1:1</button>
+        <button data-v="1.7778">16:9</button><button data-v="custom">Custom</button>
+      </div>
+      <select id="ar" hidden>
+        <option value="0.5625" selected>9:16</option><option value="0.8">4:5</option><option value="1">1:1</option>
+        <option value="1.7778">16:9</option><option value="2.3333">21:9</option><option value="custom">custom</option>
+      </select>
+      <div class="row" id="cust" style="display:none;margin-top:8px">
+        <input type="number" id="cw" value="9" min="1" step="any"><span style="flex:none" class="muted">:</span>
+        <input type="number" id="chh" value="16" min="1" step="any">
+      </div>
+      <div class="lab">Zoom <span id="zoomv">1.00×</span></div>
+      <input type="range" id="zoom" min="100" max="300" value="100">
+      <div class="lab">Camera</div>
+      <div class="seg" id="camseg">
+        <button data-v="follow">Locked</button><button data-v="smooth">Smooth</button>
+        <button data-v="calm">Calm</button><button data-v="steady">Steady</button>
+      </div>
+      <select id="camera" hidden>
+        <option value="follow">locked</option><option value="smooth">smooth</option>
+        <option value="calm" selected>calm</option><option value="steady">steady</option>
+      </select>
+      <p class="small muted" id="camdesc"></p>
+    </section>
+
+    <section>
+      <h3>Keyframes <span class="pill" id="kcount">0</span></h3>
+      <div class="row">
+        <button class="btn" id="setkf" title="Add a keyframe where the subject box is now (K)">Add</button>
+        <button class="btn" id="delkf" title="Delete the selected keyframe (Delete)">Delete</button>
+        <button class="btn" id="clear" title="Remove all keyframes">Clear</button>
+      </div>
+      <details>
+        <summary>Motion between keyframes</summary>
+        <select id="interp" class="sel" style="margin-top:8px">
+          <option value="spline" selected>Smooth: flows through keyframes</option>
+          <option value="ease">Ease: slows at every keyframe</option>
+          <option value="linear">Linear: constant speed</option>
+        </select>
+      </details>
+    </section>
+
+    <section>
+      <h3>Export</h3>
+      <div class="row">
+        <div><div class="lab">Height</div><select id="size" class="sel">
+          <option value="1920">1920</option><option value="1280" selected>1280</option>
+          <option value="1080">1080</option><option value="native">Native</option></select></div>
+        <div><div class="lab">Frame rate</div><select id="ofps" class="sel"><option>60</option><option selected>30</option></select></div>
+      </div>
+      <button class="btn big" id="export" style="margin-top:12px">Export video</button>
+      <div id="prog" hidden><div class="meter"><i id="pfill"></i></div><p class="small muted" id="ptxt"></p></div>
+      <div class="row" style="margin-top:8px">
+        <button class="btn" id="json" title="Save keyframes and settings as a .json file">Save project</button>
+        <button class="btn" id="imp" title="Open a saved .json project">Open project</button>
+      </div>
+      <input type="file" id="impf" accept=".json,application/json" hidden>
+      <p class="small muted">Export records in real time. For a frame-perfect render, save the project and use <code>track_to_ffmpeg.py</code>.</p>
+    </section>
+  </aside>
+
+  <footer id="foot">
+    <div class="transport">
+      <button class="btn icon ghost" id="tostart" title="Go to start (Home)"><svg viewBox="0 0 24 24"><path d="M6 5v14M18 6l-8 6 8 6z"/></svg></button>
+      <button class="btn icon ghost" id="back" title="Back one frame (←)"><svg viewBox="0 0 24 24"><path d="M15 6l-6 6 6 6"/></svg></button>
+      <button class="btn icon" id="play" title="Play / pause (Space)"><svg class="fill" viewBox="0 0 24 24"><use id="playuse" href="#i-play"/></svg></button>
+      <button class="btn icon ghost" id="fwd" title="Forward one frame (→)"><svg viewBox="0 0 24 24"><path d="M9 6l6 6-6 6"/></svg></button>
+      <span id="time"><b>0:00.00</b> / 0:00.00</span>
+      <span class="spacer"></span>
+      <span class="legend" id="legend"></span>
+      <button class="btn icon ghost" id="undo" title="Undo (Ctrl/⌘+Z)"><svg viewBox="0 0 24 24"><path d="M9 14L4 9l5-5"/><path d="M4 9h10.5a5.5 5.5 0 0 1 0 11H11"/></svg></button>
+      <button class="btn icon ghost" id="redo" title="Redo (Ctrl/⌘+Shift+Z)"><svg viewBox="0 0 24 24"><path d="M15 14l5-5-5-5"/><path d="M20 9H9.5a5.5 5.5 0 0 0 0 11H13"/></svg></button>
+    </div>
     <div id="track"><canvas id="film"></canvas><div id="played"></div><div id="head"></div></div>
     <div id="ticks"></div>
-  </div>
+  </footer>
+</div>
 
-  <div class="bar">
-    <input type="file" id="file" accept="video/*">
-    <button id="play">▶</button>
-    <button id="back">−1f</button><button id="fwd">+1f</button>
-    <button id="setkf">set keyframe</button>
-    <button id="delkf">delete</button>
-    <button id="clear">clear all</button>
-    <button id="undo" title="undo (ctrl/⌘+z)">↶</button><button id="redo" title="redo (ctrl/⌘+shift+z)">↷</button>
-    <button id="trk" title="follow the subject automatically from the current time (t)">auto-track</button>
-    <label title="size of the patch the tracker locks onto (dashed square)">target
-      <input type="range" id="tsize" min="4" max="60" value="18"></label>
-    <span id="msg"></span>
-    <span id="info"></span>
-  </div>
-
-  <div class="bar">
-    <label>aspect <select id="ar">
-      <option value="0.5625" selected>9:16 vertical</option>
-      <option value="0.8">4:5 portrait</option>
-      <option value="1">1:1 square</option>
-      <option value="1.7778">16:9 wide</option>
-      <option value="2.3333">21:9 cinema</option>
-      <option value="custom">custom…</option>
-    </select></label>
-    <label id="cust" style="display:none">
-      <input type="number" id="cw" value="9" min="1" step="any" style="width:56px">
-      :
-      <input type="number" id="chh" value="16" min="1" step="any" style="width:56px">
-    </label>
-    <label>zoom <input type="range" id="zoom" min="100" max="300" value="100"><span id="zoomv">1.00×</span></label>
-    <label>height <select id="size">
-      <option value="1920">1920</option><option value="1280" selected>1280</option>
-      <option value="1080">1080</option><option value="native">native</option>
-    </select></label>
-    <label title="how the camera follows the subject: hold still while it moves around inside the shot, or stay locked on it">camera <select id="camera">
-      <option value="follow">locked on</option>
-      <option value="smooth">smooth</option>
-      <option value="calm" selected>calm</option>
-      <option value="steady">steady</option>
-    </select></label>
-    <label>motion <select id="interp">
-      <option value="spline" selected>smooth</option>
-      <option value="ease">ease each</option>
-      <option value="linear">linear</option>
-    </select></label>
-    <label>fps <select id="ofps"><option>60</option><option selected>30</option></select></label>
-    <button id="export">export video</button>
-    <button id="json">export json</button>
-    <button id="imp">import json</button><input type="file" id="impf" accept=".json,application/json" hidden>
-    <div id="prog"><div id="pbar"><div id="pfill"></div></div><span id="ptxt"></span></div>
+<div id="helpm" hidden>
+  <div class="modal">
+    <h2>How it works</h2>
+    <ol>
+      <li><b>Open a video.</b> Drop it on the page or use Open video. Nothing is uploaded.</li>
+      <li><b>Box the subject.</b> Drag a box around the person or thing to follow. Fit it snugly so it holds mostly subject and little background.</li>
+      <li><b>Track.</b> It follows the subject forward from the playhead. If it slips somewhere, go to that moment, box the subject again, and track from there.</li>
+      <li><b>Pick a shape and camera, then export.</b> <i>Calm</i> holds still and only pans when needed. <i>Locked</i> stays centred on the subject.</li>
+    </ol>
+    <h4>On the video</h4>
+    <div class="keys">
+      <span>drag</span><span>box a new subject (or fix it at this moment)</span>
+      <span>drag the box</span><span>move the subject at this moment</span>
+      <span>click</span><span>move the subject here, keeping its size</span>
+    </div>
+    <h4>Keyboard</h4>
+    <div class="keys">
+      <span><kbd>T</kbd></span><span>track / stop (<kbd>Esc</kbd> stops too)</span>
+      <span><kbd>Space</kbd></span><span>play / pause</span>
+      <span><kbd>←</kbd> <kbd>→</kbd></span><span>step one frame (hold <kbd>Shift</kbd> for ten)</span>
+      <span><kbd>K</kbd></span><span>add a keyframe</span>
+      <span><kbd>Delete</kbd></span><span>delete the selected keyframe</span>
+      <span><kbd>Ctrl/⌘</kbd>+<kbd>Z</kbd></span><span>undo (with <kbd>Shift</kbd> to redo)</span>
+      <span><kbd>O</kbd></span><span>open a video</span>
+      <span><kbd>?</kbd></span><span>this help</span>
+    </div>
+    <div style="text-align:right;margin-top:18px"><button class="btn primary" id="helpx">Got it</button></div>
   </div>
 </div>
 
@@ -137,30 +368,63 @@
 const $=id=>document.getElementById(id);
 const vid=$('src'), ov=$('ov'), out=$('out');
 let keys=[];                      // {t,x,y} subject centre in source pixels
-let sel=-1, W=0, H=0, cw=0, ch=0, dragging=false, SRCNAME='(none)';
+let sel=-1, W=0, H=0, cw=0, ch=0, SRCNAME='(none)';
 let tracking=false, stopTrack=false, tgt=null, pendingTrack=null, thumbs=[];
-const say=m=>{ $('msg').textContent=m||''; };
+let tbox={w:0,h:0};               // size of the subject box, source pixels
+let subjectSet=false, trackedOnce=false, lostAt=null, trackProg=0, trackMode='';
+let drag=null;                    // the gesture in progress on the video
+const clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
+const fmt=t=>{ t=Math.max(0,t||0); const m=Math.floor(t/60), s=t-m*60;
+  return `${m}:${s<10?'0':''}${s.toFixed(2)}`; };
+
+/* ---------- messages ---------- */
+function toast(msg,{kind='',action=null,ms=5000}={}){
+  const d=document.createElement('div'); d.className='toast '+kind;
+  const sp=document.createElement('span'); sp.textContent=msg; d.appendChild(sp);
+  if(action){ const b=document.createElement('button'); b.className='btn'; b.style.height='28px';
+    b.textContent=action.label; b.onclick=()=>{ action.fn(); d.remove(); }; d.appendChild(b); }
+  const x=document.createElement('span'); x.className='x'; x.textContent='✕'; x.onclick=()=>d.remove(); d.appendChild(x);
+  $('toasts').appendChild(d);
+  while($('toasts').children.length>3) $('toasts').firstChild.remove();
+  if(ms) setTimeout(()=>d.remove(),action?ms*2:ms);
+}
+const say=m=>m&&toast(m);
 
 /* ---------- load ---------- */
-function load(url,name){ SRCNAME=name||url; keys=[]; thumbs=[];
-  vid.src=url; vid.load(); $('empty').style.display='none'; }
-$('file').onchange=e=>{ const f=e.target.files[0]; if(f) load(URL.createObjectURL(f),f.name); };
+function load(url,name){
+  SRCNAME=name||url; keys=[]; thumbs=[]; sel=-1;
+  subjectSet=false; trackedOnce=false; lostAt=null;
+  vid.src=url; vid.load();
+}
+const openFile=()=>{ if(!tracking) $('file').click(); };
+$('open').onclick=openFile; $('pick').onclick=openFile;
+$('file').onchange=e=>{ const f=e.target.files[0]; if(f) load(URL.createObjectURL(f),f.name); e.target.value=''; };
+let dragDepth=0;
+addEventListener('dragenter',e=>{ e.preventDefault(); if(++dragDepth===1) document.body.classList.add('dropping'); });
+addEventListener('dragleave',()=>{ if(--dragDepth<=0){ dragDepth=0; document.body.classList.remove('dropping'); } });
 addEventListener('dragover',e=>e.preventDefault());
-addEventListener('drop',e=>{ e.preventDefault(); if(tracking) return;
+addEventListener('drop',e=>{ e.preventDefault(); dragDepth=0; document.body.classList.remove('dropping');
+  if(tracking) return;
   const fs=[...e.dataTransfer.files];
   const f=fs.find(x=>x.type.startsWith('video/'));
   const j=fs.find(x=>x.name.toLowerCase().endsWith('.json'));
   if(f) load(URL.createObjectURL(f),f.name);
-  if(j) readTrack(j); });
-vid.addEventListener('error',()=>{ $('empty').style.display='grid'; });
+  if(j) readTrack(j);
+  if(!f&&!j&&fs.length) toast("That isn't a video this browser recognises.",{kind:'warn'}); });
+vid.addEventListener('error',()=>{
+  document.body.classList.remove('loaded'); $('empty').hidden=false; W=0;
+  toast("This browser can't play that file. Try an MP4 (H.264). The README shows how to convert one.",{kind:'warn',ms:9000}); });
 // ?v=path loads a video straight from the server, handy for a fixed workflow
 const q=new URLSearchParams(location.search).get('v');
 if(q) load(q,q.split('/').pop());
 
 vid.addEventListener('loadedmetadata',()=>{
-  W=vid.videoWidth; H=vid.videoHeight; cropSize();
+  W=vid.videoWidth; H=vid.videoHeight;
+  const s=Math.round(Math.min(W,H)*0.18); tbox={w:s,h:s};
+  cropSize();
   if(!keys.length) keys=[{t:0,x:W/2,y:H/2}];
   undoStack=[]; redoStack=[];
+  document.body.classList.add('loaded'); $('empty').hidden=true;
   if(pendingTrack){ const p=pendingTrack; pendingTrack=null; applyTrack(p); }
   layout(); ticks(); renderKeys(); draw(); buildFilm(vid.currentSrc||vid.src);
 });
@@ -176,22 +440,34 @@ function cropSize(){
   if(ar<=W/H){ ch=H; cw=H*ar; } else { cw=W; ch=W/ar; }   // largest box of this aspect
   cw/=z; ch/=z;
   cw=Math.min(W,Math.round(cw/2)*2); ch=Math.min(H,Math.round(ch/2)*2);
-  $('artag').textContent=`${cw}×${ch}`;
+  $('artag').textContent=`${cw}×${ch} crop`;
 }
 const clampX=x=>Math.max(cw/2,Math.min(W-cw/2,x));
 const clampY=y=>Math.max(ch/2,Math.min(H-ch/2,y));
 
 /* ---------- layout ---------- */
 function layout(){
-  const stage=$('stage'), avail=stage.clientHeight-28;
-  const outH=avail, outW=outH*cw/ch;
-  out.style.height=outH+'px'; $('outwrap').style.width=outW+'px';
-  out.width=cw; out.height=ch;
-  const s=Math.min((stage.clientWidth-outW-42)/W, avail/H);
+  if(!W) return;
+  const st=$('stage'), cs=getComputedStyle(st);
+  const aw=st.clientWidth-parseFloat(cs.paddingLeft)-parseFloat(cs.paddingRight);
+  const ah=st.clientHeight-parseFloat(cs.paddingTop)-parseFloat(cs.paddingBottom)-20;
+  let oh, ow, s;
+  if(matchMedia('(max-width:880px)').matches){
+    // narrow screens: video across the full width, preview underneath
+    s=Math.max(0.05,Math.min(aw/W, ah*0.6/H));
+    oh=Math.max(60,ah-H*s-38); ow=oh*cw/ch;
+    if(ow>aw){ ow=aw; oh=ow*ch/cw; }
+  } else {
+    // the video you work on gets the room; the preview takes at most a quarter
+    oh=ah; ow=oh*cw/ch;
+    if(ow>aw*0.26){ ow=aw*0.26; oh=ow*ch/cw; }
+    s=Math.max(0.05,Math.min((aw-ow-18)/W, ah/H));
+  }
+  out.width=cw; out.height=ch; out.style.width=ow+'px'; out.style.height=oh+'px';
   vid.style.width=(W*s)+'px'; vid.style.height=(H*s)+'px';
-  ov.width=W*s; ov.height=H*s; ov.style.width=ov.width+'px'; ov.style.height=ov.height+'px';
+  ov.width=Math.round(W*s); ov.height=Math.round(H*s); ov.style.width=W*s+'px'; ov.style.height=H*s+'px';
 }
-addEventListener('resize',()=>{ if(W){layout(); drawFilm(); draw();} });
+addEventListener('resize',()=>{ if(W){ layout(); drawFilm(); draw(); } });
 
 /* ---------- interpolation ---------- */
 // Monotone cubic (Fritsch-Carlson) tangents. The ends are 0 so the crop holds
@@ -248,6 +524,10 @@ function crop(t){
 // it, then round off the starts and stops while keeping inside the zone.
 //   [zone: share of the free room each side of the subject, blur in seconds]
 const CAM={follow:null, smooth:[0.35,0.15], calm:[0.6,0.2], steady:[0.8,0.3]};
+const CAMDESC={follow:'Stays centred on the subject. The most movement.',
+  smooth:'Follows closely but filters out jitter.',
+  calm:'Holds still and pans only when the subject nears the edge.',
+  steady:'Moves the least. A very fast subject can briefly leave the shot.'};
 const CDT=1/20;
 let camCache={sig:null};
 function gauss(a,sg){
@@ -273,81 +553,181 @@ function tube(s,m,sg){
 }
 function camPath(){
   let h=0; for(const k of keys) h=(h*31+k.t*1009+k.x*7+k.y*3)%1e9;
-  const sig=[h,keys.length,$('camera').value,$('interp').value,cw,ch,$('tsize').value,vid.duration].join('|');
+  const sig=[h,keys.length,$('camera').value,$('interp').value,cw,ch,tbox.w,tbox.h,vid.duration].join('|');
   if(camCache.sig===sig) return camCache;
   const [zone,blur]=CAM[$('camera').value], n=Math.ceil(vid.duration/CDT)+1;
   const sx=new Float64Array(n), sy=new Float64Array(n);
   for(let i=0;i<n;i++){ const p=at(i*CDT); sx[i]=clampX(p.x); sy[i]=clampY(p.y); }
   // room the subject can drift each side of centre while staying in shot
-  const half=tgtSide()/2, mx=zone*Math.max(0,cw/2-half), my=zone*Math.max(0,ch/2-half);
+  const mx=zone*Math.max(0,cw/2-tbox.w/2), my=zone*Math.max(0,ch/2-tbox.h/2);
   camCache={sig,dt:CDT, xs:W-cw>1?tube(sx,mx,blur/CDT):sx, ys:H-ch>1?tube(sy,my,blur/CDT):sy};
   return camCache;
 }
 
 /* ---------- undo ---------- */
 let undoStack=[], redoStack=[];
-const snap=()=>JSON.stringify(keys);
+const snap=()=>JSON.stringify({keys,tbox,subjectSet});
 function pushUndo(){ undoStack.push(snap()); if(undoStack.length>200) undoStack.shift(); redoStack=[]; }
-function restore(s){ keys=JSON.parse(s); sel=-1; renderKeys(); drawFilm(); draw(); }
+function restore(s){ const o=JSON.parse(s); keys=o.keys; tbox=o.tbox; subjectSet=o.subjectSet;
+  sel=-1; renderKeys(); drawFilm(); draw(); }
 function undo(){ if(tracking||!undoStack.length) return; redoStack.push(snap()); restore(undoStack.pop()); }
 function redo(){ if(tracking||!redoStack.length) return; undoStack.push(snap()); restore(redoStack.pop()); }
 function setKey(t,x,y){
   const i=keys.findIndex(k=>Math.abs(k.t-t)<0.04);
-  if(i>=0){ keys[i].x=x; keys[i].y=y; sel=i; }
+  if(i>=0){ keys[i].x=x; keys[i].y=y; keys[i].auto=false; sel=i; }
   else { keys.push({t,x,y}); keys.sort((a,b)=>a.t-b.t); sel=keys.findIndex(k=>k.t===t); }
   renderKeys(); drawFilm();
 }
 
-/* ---------- drag on the frame ---------- */
+/* ---------- selecting the subject on the video ---------- */
+// drag on empty video = box a subject; drag inside the box = move it; click = move it here
 const wrap=$('wrap');
+const toSrc=e=>{ const r=vid.getBoundingClientRect();
+  return {x:clamp((e.clientX-r.left)/r.width*W,0,W), y:clamp((e.clientY-r.top)/r.height*H,0,H)}; };
+const subjAt=t=>{ const q=at(t); return {x:q.x-tbox.w/2,y:q.y-tbox.h/2,w:tbox.w,h:tbox.h}; };
+const inBox=(p,b)=>p.x>=b.x&&p.x<=b.x+b.w&&p.y>=b.y&&p.y<=b.y+b.h;
+function pause(){ vid.pause(); }
+function placeSubject(t,x,y){
+  if(!subjectSet){ keys=[{t,x,y}]; sel=0; subjectSet=true; renderKeys(); drawFilm(); }
+  else setKey(t,x,y);
+  lostAt=null;
+}
 wrap.addEventListener('dragstart',e=>e.preventDefault());
 wrap.addEventListener('pointerdown',e=>{
-  if(!W||tracking) return; e.preventDefault(); dragging=true; pushUndo();
+  if(!W||tracking||e.target.closest('#ftrack')) return;
+  e.preventDefault(); pause();
   try{ wrap.setPointerCapture(e.pointerId); }catch(_){}
-  pick(e); });
-wrap.addEventListener('pointermove',e=>{ if(dragging){ e.preventDefault(); pick(e); } });
-const endDrag=e=>{ dragging=false; try{ wrap.releasePointerCapture(e.pointerId); }catch(_){} };
+  const p=toSrc(e), t=vid.currentTime, b=subjAt(t);
+  if(subjectSet&&inBox(p,b)) drag={mode:'move',dx:p.x-(b.x+b.w/2),dy:p.y-(b.y+b.h/2),undo:false};
+  else drag={mode:'box',x0:p.x,y0:p.y,x1:p.x,y1:p.y,cx:e.clientX,cy:e.clientY,moved:false};
+});
+wrap.addEventListener('pointermove',e=>{
+  if(!W) return;
+  const p=toSrc(e);
+  if(!drag){ wrap.classList.toggle('over',subjectSet&&!tracking&&inBox(p,subjAt(vid.currentTime))); return; }
+  e.preventDefault();
+  if(drag.mode==='move'){
+    if(!drag.undo){ pushUndo(); drag.undo=true; }
+    setKey(vid.currentTime,p.x-drag.dx,p.y-drag.dy); lostAt=null;
+  } else {
+    drag.x1=p.x; drag.y1=p.y;
+    if(Math.hypot(e.clientX-drag.cx,e.clientY-drag.cy)>5) drag.moved=true;
+  }
+});
+const endDrag=e=>{
+  try{ wrap.releasePointerCapture(e.pointerId); }catch(_){}
+  if(!drag) return;
+  const d=drag; drag=null;
+  if(d.mode!=='box') return;
+  const t=vid.currentTime, bw=Math.abs(d.x1-d.x0), bh=Math.abs(d.y1-d.y0);
+  pushUndo();
+  if(d.moved&&bw>=6&&bh>=6){
+    tbox={w:Math.round(bw),h:Math.round(bh)};
+    placeSubject(t,(d.x0+d.x1)/2,(d.y0+d.y1)/2);
+  } else placeSubject(t,d.x1,d.y1);
+  grabThumb();
+};
 wrap.addEventListener('pointerup',endDrag);
 wrap.addEventListener('pointercancel',endDrag);
-function pick(e){
-  const r=vid.getBoundingClientRect();
-  setKey(vid.currentTime,
-         Math.max(0,Math.min(W,(e.clientX-r.left)/r.width*W)),
-         Math.max(0,Math.min(H,(e.clientY-r.top)/r.height*H)));
-  draw();
+$('ftrack').onclick=e=>{ e.stopPropagation(); $('trk').click(); };
+
+// a little picture of what's selected, for the panel
+function grabThumb(){
+  const c=$('thumb').getContext('2d'), q=at(vid.currentTime);
+  const s=Math.max(tbox.w,tbox.h)*1.15;
+  c.fillStyle='#000'; c.fillRect(0,0,92,92);
+  try{ c.drawImage(vid,q.x-s/2,q.y-s/2,s,s,0,0,92,92); }catch(_){}
 }
 
 /* ---------- draw ---------- */
+let lastHint='', lastSteps='';
 function draw(){
   if(!W) return;
   const c=ov.getContext('2d'); c.clearRect(0,0,ov.width,ov.height);
-  const s=ov.width/W, p=crop(vid.currentTime), q=at(vid.currentTime);
-  const l=(p.x-cw/2)*s, t=(p.y-ch/2)*s, w=cw*s, h=ch*s;
-  c.fillStyle='#000000a8';
-  c.fillRect(0,0,ov.width,t); c.fillRect(0,t+h,ov.width,ov.height-t-h);
-  c.fillRect(0,t,l,h); c.fillRect(l+w,t,ov.width-l-w,h);
-  c.strokeStyle='#7fd6a0'; c.lineWidth=2; c.strokeRect(l+1,t+1,w-2,h-2);
-  c.strokeStyle='#c8607a'; c.lineWidth=1.5;
-  // crosshair on the subject itself, which the crop may not be able to centre on
-  c.beginPath(); c.moveTo(q.x*s,t); c.lineTo(q.x*s,t+h);
-  c.moveTo(l,q.y*s); c.lineTo(l+w,q.y*s); c.stroke();
-  // the patch auto-track locks onto
-  const g=tgt||q, ts=tgtSide()*s;
-  c.setLineDash([5,4]); c.strokeStyle=tracking?'#7fd6a0':'#ffffff66'; c.lineWidth=1.5;
-  c.strokeRect(g.x*s-ts/2,g.y*s-ts/2,ts,ts); c.setLineDash([]);
+  const t=vid.currentTime, s=ov.width/W, p=crop(t), q=tracking&&tgt?tgt:at(t);
+  // dim what the output won't show
+  const l=(p.x-cw/2)*s, tp=(p.y-ch/2)*s, w=cw*s, h=ch*s;
+  c.fillStyle='#000000b0';
+  c.fillRect(0,0,ov.width,tp); c.fillRect(0,tp+h,ov.width,ov.height-tp-h);
+  c.fillRect(0,tp,l,h); c.fillRect(l+w,tp,ov.width-l-w,h);
+  c.strokeStyle='#ffffffd0'; c.lineWidth=1.5; c.strokeRect(l+.75,tp+.75,w-1.5,h-1.5);
+  c.font='600 10px system-ui,sans-serif'; c.fillStyle='#ffffffb0'; c.fillText('OUTPUT',l+7,tp+15);
+  // the subject box
+  if(subjectSet&&!(drag&&drag.mode==='box'&&drag.moved)){
+    const col=tracking?'#4fd69c':'#ff5d7d';
+    const bx=(q.x-tbox.w/2)*s, by=(q.y-tbox.h/2)*s, bw=tbox.w*s, bh=tbox.h*s, k=Math.min(12,bw/3,bh/3);
+    c.strokeStyle=col+'70'; c.lineWidth=1; c.strokeRect(bx,by,bw,bh);
+    c.strokeStyle=col; c.lineWidth=2.5; c.beginPath();
+    [[bx,by,1,1],[bx+bw,by,-1,1],[bx,by+bh,1,-1],[bx+bw,by+bh,-1,-1]].forEach(([x,y,dx,dy])=>{
+      c.moveTo(x+dx*k,y); c.lineTo(x,y); c.lineTo(x,y+dy*k); });
+    c.stroke();
+    const lab=tracking?'TRACKING':'SUBJECT', tw=c.measureText(lab).width+10;
+    const ly=by>18?by-17:by+bh+3;
+    c.fillStyle=col; c.fillRect(bx,ly,tw,14); c.fillStyle='#0c0d11'; c.fillText(lab,bx+5,ly+10.5);
+  }
+  if(drag&&drag.mode==='box'&&drag.moved){
+    const x=Math.min(drag.x0,drag.x1)*s, y=Math.min(drag.y0,drag.y1)*s;
+    c.fillStyle='#ff5d7d1f'; c.fillRect(x,y,Math.abs(drag.x1-drag.x0)*s,Math.abs(drag.y1-drag.y0)*s);
+    c.setLineDash([6,4]); c.strokeStyle='#ff5d7d'; c.lineWidth=2;
+    c.strokeRect(x,y,Math.abs(drag.x1-drag.x0)*s,Math.abs(drag.y1-drag.y0)*s); c.setLineDash([]);
+  }
+  // the output
   const o=out.getContext('2d');
   o.fillStyle='#000'; o.fillRect(0,0,cw,ch);
   try{ o.drawImage(vid, p.x-cw/2,p.y-ch/2,cw,ch, 0,0,cw,ch); }catch(_){}
+  // floating Track button beside the subject
+  const fb=$('ftrack'), showF=subjectSet&&!tracking&&!drag&&vid.paused;
+  fb.hidden=!showF;
+  if(showF){
+    const bx=(q.x+tbox.w/2)*s+8, by=(q.y-tbox.h/2)*s;
+    const fw=fb.offsetWidth||70;
+    fb.style.left=clamp(bx+fw>ov.width?(q.x-tbox.w/2)*s-fw-8:bx,4,ov.width-fw-4)+'px';
+    fb.style.top=clamp(by,4,ov.height-32)+'px';
+  }
+  // timeline + status
   const d=vid.duration||1;
-  $('head').style.left=(vid.currentTime/d*100)+'%';
-  $('played').style.width=(vid.currentTime/d*100)+'%';
-  $('info').textContent=`${vid.currentTime.toFixed(2)} / ${(vid.duration||0).toFixed(2)}s   `
-    +`subject ${Math.round(q.x)},${Math.round(q.y)}   ${keys.length} keyframe${keys.length===1?'':'s'}`;
+  $('head').style.left=(t/d*100)+'%'; $('played').style.width=(t/d*100)+'%';
+  $('time').innerHTML=`<b>${fmt(t)}</b> / ${fmt(vid.duration)}`;
+  $('playuse').setAttribute('href',vid.paused?'#i-play':'#i-pause');
+  { let a=0; for(const k of keys) if(k.auto) a++;
+    $('kcount').textContent=a?`${keys.length-a} placed · ${a} tracked`:`${keys.length}`; }
+  const ht=hintText();
+  if(ht!==lastHint){ lastHint=ht; $('hint').textContent=ht; $('hint').classList.toggle('go',!subjectSet); }
+  status();
 }
 (function loop(){ draw(); requestAnimationFrame(loop); })();
 
-/* ---------- filmstrip + path curve ---------- */
+function hintText(){
+  if(!W) return '';
+  if(tracking) return `Tracking ${Math.round(trackProg*100)}%  ·  Esc to stop`;
+  if(drag&&drag.mode==='box') return drag.moved?'Release to select':'';
+  if(!subjectSet) return 'Drag a box around what you want to follow';
+  if(lostAt!=null) return `Lost it at ${fmt(lostAt)}. Box it there and track again`;
+  if(!trackedOnce) return 'Now press Track to follow it through the clip';
+  return '';
+}
+function status(){
+  const step=!W?'open':!subjectSet?'select':!trackedOnce?'track':'export';
+  const order=['open','select','track','export'];
+  const sig=step+(tracking?1:0)+subjectSet+trackedOnce+tbox.w+'x'+tbox.h;
+  if(sig===lastSteps) return; lastSteps=sig;
+  document.querySelectorAll('#steps li').forEach(li=>{
+    const i=order.indexOf(li.dataset.s), cur=order.indexOf(step);
+    li.className=i<cur?'done':i===cur?'cur':''; });
+  $('subj').classList.toggle('none',!subjectSet);
+  $('subjT1').textContent=subjectSet?'Subject selected':'Nothing selected';
+  $('subjT2').textContent=subjectSet?`${tbox.w}×${tbox.h} px box · drag a new box to change it`
+    :'Drag a box around it on the video';
+  if(!subjectSet){ const c=$('thumb').getContext('2d'); c.clearRect(0,0,92,92); }
+  $('trk').className='btn big'+(tracking?' stop':subjectSet?' primary':'');
+  $('trkLabel').textContent=tracking?'Stop tracking':'Track subject';
+  $('trkKey').textContent=tracking?'Esc':'T';
+  $('trk').querySelector('use').setAttribute('href',tracking?'#i-stop':'#i-play');
+  $('tprog').hidden=!tracking;
+  $('export').className='btn big'+(trackedOnce?' primary':'');
+}
 
+/* ---------- filmstrip + path curve ---------- */
 async function buildFilm(url){
   thumbs=[];
   const v=document.createElement('video');
@@ -355,7 +735,7 @@ async function buildFilm(url){
   try{ await new Promise((res,rej)=>{ v.addEventListener('loadedmetadata',res,{once:true});
        v.addEventListener('error',rej,{once:true}); }); }catch(_){ return; }
   const N=Math.min(24,Math.max(8,Math.round(v.duration*1.2)));
-  const th=84, tw=Math.round(th*v.videoWidth/v.videoHeight);
+  const th=64, tw=Math.round(th*v.videoWidth/v.videoHeight);
   const cv=document.createElement('canvas'); cv.width=tw; cv.height=th;
   const cx=cv.getContext('2d');
   for(let i=0;i<N;i++){
@@ -373,18 +753,30 @@ function drawFilm(){
   if(cv.width!==r.width*dpr||cv.height!==r.height*dpr){ cv.width=r.width*dpr; cv.height=r.height*dpr; }
   const c=cv.getContext('2d'); c.setTransform(dpr,0,0,dpr,0,0);
   const w=r.width,h=r.height;
-  c.clearRect(0,0,w,h); c.fillStyle='#12121a'; c.fillRect(0,0,w,h);
+  c.clearRect(0,0,w,h); c.fillStyle='#101217'; c.fillRect(0,0,w,h);
   if(thumbs.length){
     const tw=w/thumbs.length;
     thumbs.forEach((im,i)=>{ if(im.complete&&im.naturalWidth) c.drawImage(im,i*tw,0,tw+1,h); });
-    c.fillStyle='#101017aa'; c.fillRect(0,0,w,h);
+    c.fillStyle='#0c0d11b8'; c.fillRect(0,0,w,h);
   }
-  if(!W||!vid.duration) return;
+  const lg=[];
+  if(!W||!vid.duration){ $('legend').innerHTML=''; return; }
+  // tracked stretches: a band along the bottom from each tracked run's start to its end
+  const ks=[...keys].sort((a,b)=>a.t-b.t); let runA=null, any=false;
+  const band=(a,b)=>{ any=true; c.fillStyle='#4fd69c'; c.globalAlpha=.85;
+    c.fillRect(a/vid.duration*w,h-4,Math.max(2,(b-a)/vid.duration*w),4); c.globalAlpha=1; };
+  ks.forEach((k,i)=>{
+    if(k.auto&&runA===null) runA=i>0?ks[i-1].t:k.t;
+    if(!k.auto&&runA!==null){ band(runA,ks[i-1].t); runA=null; }
+  });
+  if(runA!==null) band(runA,ks[ks.length-1].t);
+  if(any) lg.push(['#4fd69c','tracked','band']);
   const line=(get,col)=>{ c.strokeStyle=col; c.lineWidth=2; c.beginPath();
     for(let px=0;px<=w;px++){ const v2=get(px/w*vid.duration);
       px?c.lineTo(px,v2):c.moveTo(px,v2); } c.stroke(); };
-  if(W-cw>1) line(t=>h-((crop(t).x-cw/2)/(W-cw))*(h-14)-7, '#7fd6a0');
-  if(H-ch>1) line(t=>h-((crop(t).y-ch/2)/(H-ch))*(h-14)-7, '#c8607a');
+  if(W-cw>1){ line(t=>h-8-((crop(t).x-cw/2)/(W-cw))*(h-16), '#e9ebf1'); lg.unshift(['#e9ebf1','camera ↔']); }
+  if(H-ch>1){ line(t=>h-8-((crop(t).y-ch/2)/(H-ch))*(h-16), '#f2b45a'); lg.unshift(['#f2b45a','camera ↕']); }
+  $('legend').innerHTML=lg.map(([c,n,b])=>`<span><i style="background:${c};${b?'height:4px;border-radius:1px':''}"></i>${n}</span>`).join('');
 }
 
 /* ---------- timeline ---------- */
@@ -395,7 +787,7 @@ $('track').addEventListener('pointerdown',e=>{
   if(e.target.classList.contains('kf')||!W||tracking) return;
   e.preventDefault(); scrub=true;
   try{ $('track').setPointerCapture(e.pointerId); }catch(_){}
-  vid.pause(); $('play').textContent='▶'; vid.currentTime=timeAt(e);
+  pause(); vid.currentTime=timeAt(e);
 });
 $('track').addEventListener('pointermove',e=>{ if(scrub) vid.currentTime=timeAt(e); });
 $('track').addEventListener('pointerup',e=>{ scrub=false;
@@ -403,18 +795,20 @@ $('track').addEventListener('pointerup',e=>{ scrub=false;
 
 function renderKeys(){
   [...$('track').querySelectorAll('.kf')].forEach(n=>n.remove());
+  const hand=keys.filter(k=>!k.auto), dense=hand.length>60;
   keys.forEach((k,i)=>{
+    if(k.auto) return;               // tracked stretches are drawn as a band instead
     const d=document.createElement('div');
-    d.className='kf'+(i===sel?' sel':'');
+    d.className='kf'+(dense?' dense':'')+(i===sel?' sel':'');
     d.style.left=(k.t/(vid.duration||1)*100)+'%';
-    d.title=`${k.t.toFixed(2)}s  ${Math.round(k.x)},${Math.round(k.y)}`;
+    d.title=`keyframe at ${fmt(k.t)} (drag to move it in time)`;
     d.onpointerdown=ev=>{
       ev.stopPropagation(); ev.preventDefault(); if(tracking) return;
-      pushUndo(); sel=i; vid.currentTime=k.t; renderKeys();
+      pushUndo(); sel=i; pause(); vid.currentTime=k.t; renderKeys();
       try{ d.setPointerCapture(ev.pointerId); }catch(_){}
       const move=m=>{ k.t=timeAt(m); vid.currentTime=k.t;
         keys.sort((a,b)=>a.t-b.t); sel=keys.indexOf(k); renderKeys(); drawFilm(); };
-      const up=u=>{ d.removeEventListener('pointermove',move); d.removeEventListener('pointerup',up); };
+      const up=()=>{ d.removeEventListener('pointermove',move); d.removeEventListener('pointerup',up); };
       d.addEventListener('pointermove',move); d.addEventListener('pointerup',up);
     };
     $('track').appendChild(d);
@@ -422,49 +816,71 @@ function renderKeys(){
 }
 function ticks(){
   const el=$('ticks'); el.innerHTML='';
-  const n=Math.min(12,Math.max(2,Math.ceil(vid.duration)));
+  const n=Math.min(10,Math.max(2,Math.ceil(vid.duration)),Math.max(2,Math.floor($('track').clientWidth/64)));
   for(let i=0;i<=n;i++){
     const s=document.createElement('span');
-    s.style.left=(i/n*100)+'%'; s.textContent=(vid.duration*i/n).toFixed(1)+'s';
+    s.style.left=`calc(${i/n*100}% ${i===0?'+ 10px':i===n?'- 14px':''})`; s.textContent=fmt(vid.duration*i/n).replace(/\.\d+$/,'');
     el.appendChild(s);
   }
 }
 
-/* ---------- transport ---------- */
-$('play').onclick=()=>{ if(!W||tracking) return;
-  if(vid.paused){vid.play();$('play').textContent='❚❚';} else {vid.pause();$('play').textContent='▶';} };
-vid.addEventListener('ended',()=>$('play').textContent='▶');
-const stepF=d=>{ if(!W||tracking) return; vid.pause(); $('play').textContent='▶';
+/* ---------- transport + settings ---------- */
+$('play').onclick=()=>{ if(!W||tracking) return; vid.paused?vid.play():vid.pause(); };
+const stepF=d=>{ if(!W||tracking) return; pause();
   vid.currentTime=Math.max(0,Math.min(vid.duration,vid.currentTime+d/60)); };
 $('back').onclick=()=>stepF(-1); $('fwd').onclick=()=>stepF(1);
+$('tostart').onclick=()=>{ if(W&&!tracking){ pause(); vid.currentTime=0; } };
 $('setkf').onclick=()=>{ if(!W||tracking) return; const p=at(vid.currentTime);
   pushUndo(); setKey(vid.currentTime,p.x,p.y); draw(); };
-$('delkf').onclick=()=>{ if(!tracking&&sel>=0&&keys.length>1){ pushUndo(); keys.splice(sel,1); sel=-1;
-  renderKeys(); drawFilm(); draw(); } };
+$('delkf').onclick=()=>{ if(tracking) return;
+  if(sel<0) return toast('Select a keyframe on the timeline first.');
+  if(keys.length<2) return toast("The last keyframe can't be deleted.");
+  pushUndo(); keys.splice(sel,1); sel=-1; renderKeys(); drawFilm(); draw(); };
 $('clear').onclick=()=>{ if(!W||tracking) return; pushUndo();
-  keys=[{t:0,x:W/2,y:H/2}]; sel=-1; renderKeys(); drawFilm(); draw(); };
+  keys=[{t:0,x:W/2,y:H/2}]; sel=-1; subjectSet=false; trackedOnce=false; lostAt=null;
+  renderKeys(); drawFilm(); draw(); toast('Cleared. Box the subject to start again.',{action:{label:'Undo',fn:undo}}); };
 $('undo').onclick=undo; $('redo').onclick=redo;
-['ar','zoom','cw','chh'].forEach(id=>$(id).addEventListener('input',()=>{
-  $('cust').style.display = $('ar').value==='custom' ? 'flex' : 'none';
-  if(!W) return; cropSize();
+
+function syncSeg(){
+  const av=$('ar').value;
+  document.querySelectorAll('#arseg button').forEach(b=>b.classList.toggle('on',
+    b.dataset.v===av||(av==='2.3333'&&b.dataset.v==='custom')));
+  document.querySelectorAll('#camseg button').forEach(b=>b.classList.toggle('on',b.dataset.v===$('camera').value));
+  $('camdesc').textContent=CAMDESC[$('camera').value];
+  $('cust').style.display=$('ar').value==='custom'?'flex':'none';
   $('zoomv').textContent=(+$('zoom').value/100).toFixed(2)+'×';
-  layout(); drawFilm(); draw();
-}));
+}
+document.querySelectorAll('#arseg button').forEach(b=>b.onclick=()=>{
+  $('ar').value=b.dataset.v; $('ar').dispatchEvent(new Event('input')); });
+document.querySelectorAll('#camseg button').forEach(b=>b.onclick=()=>{
+  $('camera').value=b.dataset.v; $('camera').dispatchEvent(new Event('change')); });
+['ar','zoom','cw','chh'].forEach(id=>$(id).addEventListener('input',()=>{
+  syncSeg(); if(!W) return; cropSize(); layout(); drawFilm(); draw(); }));
 $('interp').addEventListener('change',()=>{ drawFilm(); draw(); });
-$('camera').addEventListener('change',()=>{ drawFilm(); draw(); });
+$('camera').addEventListener('change',()=>{ syncSeg(); drawFilm(); draw(); });
+syncSeg();
+
+const help=on=>{ $('helpm').hidden=!on; };
+$('helpb').onclick=()=>help(true); $('helpx').onclick=()=>help(false);
+$('helpm').onclick=e=>{ if(e.target.id==='helpm') help(false); };
+
 addEventListener('keydown',e=>{
-  if(['INPUT','SELECT'].includes(e.target.tagName)) return;
+  if(['INPUT','SELECT','TEXTAREA'].includes(e.target.tagName)) return;
+  if(!$('helpm').hidden){ if(e.key==='Escape'||e.key==='?') help(false); return; }
   if(e.key==='Escape'&&tracking){ stopTrack=true; return; }
   if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='z'){ e.preventDefault(); e.shiftKey?redo():undo(); return; }
   if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='y'){ e.preventDefault(); redo(); return; }
   if(e.ctrlKey||e.metaKey||e.altKey) return;
-  if(e.key==='t'){ $('trk').click(); return; }
+  if(e.key==='?'){ help(true); return; }
+  if(e.key==='t'||e.key==='T'){ $('trk').click(); return; }
   if(tracking) return;
-  if(e.key===' '){e.preventDefault();$('play').click();}
-  if(e.key==='ArrowLeft'){e.preventDefault();stepF(e.shiftKey?-10:-1);}
-  if(e.key==='ArrowRight'){e.preventDefault();stepF(e.shiftKey?10:1);}
-  if(e.key==='k'){$('setkf').click();}
-  if(e.key==='Backspace'||e.key==='Delete'){$('delkf').click();}
+  if(e.key==='o'||e.key==='O'){ openFile(); return; }
+  if(e.key===' '){ e.preventDefault(); $('play').click(); }
+  if(e.key==='Home'){ e.preventDefault(); $('tostart').click(); }
+  if(e.key==='ArrowLeft'){ e.preventDefault(); stepF(e.shiftKey?-10:-1); }
+  if(e.key==='ArrowRight'){ e.preventDefault(); stepF(e.shiftKey?10:1); }
+  if(e.key==='k'||e.key==='K') $('setkf').click();
+  if(e.key==='Backspace'||e.key==='Delete') $('delkf').click();
 });
 
 /* ---------- auto-track ---------- */
@@ -474,7 +890,7 @@ addEventListener('keydown',e=>{
 //             subject than around it and follows that blob. Copes with fast
 //             motion, pose changes and lighting shifts, and when the subject
 //             vanishes it searches the whole frame to pick it up again.
-//  pattern -- otherwise. Normalised cross-correlation on the dashed patch,
+//  pattern -- otherwise. Normalised cross-correlation on the subject box,
 //             checked against the subject's original look (and its mirror
 //             image) so it can't slide onto a static background or a HUD.
 // Either way it predicts where the subject is heading, coasts through short
@@ -482,16 +898,13 @@ addEventListener('keydown',e=>{
 // following something else.
 const STEP=1/20;          // seconds between tracked samples
 const COAST=30;           // steps (1.5s) to coast before declaring it lost
-const tgtSide=()=>Math.max(8,Math.round(Math.min(W,H)*(+$('tsize').value/100)));
-$('tsize').addEventListener('input',draw);
 
 function seekTo(t){ return new Promise(res=>{
   const done=()=>{ clearTimeout(to); res(); };
   const to=setTimeout(()=>{ vid.removeEventListener('seeked',done); res(); },3000);
   vid.addEventListener('seeked',done,{once:true}); vid.currentTime=t; }); }
 
-function grabber(short){
-  const S=Math.min(1,short/Math.min(W,H));
+function grabber(S){
   const gw=Math.max(16,Math.round(W*S)), gh=Math.max(16,Math.round(H*S));
   const cv=document.createElement('canvas'); cv.width=gw; cv.height=gh;
   const cx=cv.getContext('2d',{willReadFrequently:true});
@@ -512,18 +925,18 @@ function hueBins(d,n){
   }
   return b;
 }
-function colourLocator(G,ts,bx,by){
+function colourLocator(G,tw,th,bx,by){
   const {gw,gh}=G, n=gw*gh;
   let bins=hueBins(G.grab(),n);
   const hist=(x0,y0,x1,y1,kern)=>{ const h=new Float64Array(NB); let s=0;
-    const cx=(x0+x1-1)/2, cy=(y0+y1-1)/2, r2=((x1-x0)/2)**2;
+    const cx=(x0+x1-1)/2, cy=(y0+y1-1)/2, rx=(x1-x0)/2, ry=(y1-y0)/2;
     for(let y=y0;y<y1;y++) for(let x=x0;x<x1;x++){
-      const w=kern?Math.max(0,1-((x-cx)**2+(y-cy)**2)/r2):1; h[bins[y*gw+x]]+=w; s+=w; }
+      const w=kern?Math.max(0,1-((x-cx)/rx)**2-((y-cy)/ry)**2):1; h[bins[y*gw+x]]+=w; s+=w; }
     return {h,s}; };
   // subject (centre-weighted) vs its surroundings vs the whole frame
-  const T=hist(bx,by,bx+ts,by+ts,true), F=hist(0,0,gw,gh,false);
-  const x0=Math.max(0,bx-ts), y0=Math.max(0,by-ts), x1=Math.min(gw,bx+2*ts), y1=Math.min(gh,by+2*ts);
-  const A=hist(x0,y0,x1,y1,false), B=hist(bx,by,bx+ts,by+ts,false), ringS=Math.max(1,A.s-B.s);
+  const T=hist(bx,by,bx+tw,by+th,true), F=hist(0,0,gw,gh,false);
+  const x0=Math.max(0,bx-tw), y0=Math.max(0,by-th), x1=Math.min(gw,bx+2*tw), y1=Math.min(gh,by+2*th);
+  const A=hist(x0,y0,x1,y1,false), B=hist(bx,by,bx+tw,by+th,false), ringS=Math.max(1,A.s-B.s);
   const table=new Float32Array(NB);
   for(let k=0;k<NB;k++){
     const pt=T.h[k]/T.s, pf=F.h[k]/F.s, pr=(A.h[k]-B.h[k])/ringS;
@@ -533,26 +946,26 @@ function colourLocator(G,ts,bx,by){
   const integrate=()=>{ for(let j=0;j<n;j++) w[j]=table[bins[j]];
     for(let y=0;y<gh;y++){ let row=0;
       for(let x=0;x<gw;x++){ row+=w[y*gw+x]; I[(y+1)*(gw+1)+x+1]=I[y*(gw+1)+x+1]+row; } } };
-  const box=(x,y)=>I[(y+ts)*(gw+1)+x+ts]-I[y*(gw+1)+x+ts]-I[(y+ts)*(gw+1)+x]+I[y*(gw+1)+x];
+  const box=(x,y)=>I[(y+th)*(gw+1)+x+tw]-I[y*(gw+1)+x+tw]-I[(y+th)*(gw+1)+x]+I[y*(gw+1)+x];
   const best=(xa,ya,xb,yb)=>{ let bs=-1,mx=xa,my=ya;
     for(let y=ya;y<=yb;y++) for(let x=xa;x<=xb;x++){ const s=box(x,y); if(s>bs){ bs=s; mx=x; my=y; } }
-    return {x:mx,y:my,c:bs/(ts*ts)}; };
+    return {x:mx,y:my,c:bs/(tw*th)}; };
   integrate();
-  const c0=box(bx,by)/(ts*ts);
+  const c0=box(bx,by)/(tw*th);
   let fm=0; for(let j=0;j<n;j++) fm+=w[j]; fm/=n;
   const R=Math.round(0.25*Math.min(gw,gh));
   return { distinct:c0/(fm+1e-6), c0,
     locate(px,py){
       bins=hueBins(G.grab(),n); integrate();
-      let m=best(Math.max(0,px-R),Math.max(0,py-R),Math.min(gw-ts,px+R),Math.min(gh-ts,py+R));
+      let m=best(Math.max(0,px-R),Math.max(0,py-R),Math.min(gw-tw,px+R),Math.min(gh-th,py+R));
       let ok=m.c>=0.4*c0;
-      if(!ok){ m=best(0,0,gw-ts,gh-ts); ok=m.c>=0.5*c0; }   // vanished: look everywhere
+      if(!ok){ m=best(0,0,gw-tw,gh-th); ok=m.c>=0.5*c0; }   // vanished: look everywhere
       if(ok) for(let it=0;it<2;it++){           // mean-shift onto the colour's centroid
         let s=0,sx=0,sy=0;
-        for(let y=0;y<ts;y++) for(let x=0;x<ts;x++){ const v=w[(m.y+y)*gw+m.x+x]; s+=v; sx+=v*x; sy+=v*y; }
+        for(let y=0;y<th;y++) for(let x=0;x<tw;x++){ const v=w[(m.y+y)*gw+m.x+x]; s+=v; sx+=v*x; sy+=v*y; }
         if(s<=0) break;
-        m.x=Math.max(0,Math.min(gw-ts,Math.round(m.x+sx/s-(ts-1)/2)));
-        m.y=Math.max(0,Math.min(gh-ts,Math.round(m.y+sy/s-(ts-1)/2)));
+        m.x=Math.max(0,Math.min(gw-tw,Math.round(m.x+sx/s-(tw-1)/2)));
+        m.y=Math.max(0,Math.min(gh-th,Math.round(m.y+sy/s-(th-1)/2)));
       }
       return {x:m.x,y:m.y,ok,score:m.c/c0};
     }};
@@ -563,57 +976,57 @@ function colourLocator(G,ts,bx,by){
 const LOST=0.6, DRIFT=0.4;
 const toRGB=d=>{ const o=new Float32Array(d.length/4*3);
   for(let i=0,j=0;j<o.length;i+=4,j+=3){ o[j]=d[i]; o[j+1]=d[i+1]; o[j+2]=d[i+2]; } return o; };
-function cutPatch(f,gw,x0,y0,ts){
-  const p=new Float32Array(ts*ts*3), rl=ts*3;
-  for(let y=0;y<ts;y++) p.set(f.subarray(((y0+y)*gw+x0)*3,((y0+y)*gw+x0)*3+rl),y*rl);
+function cutPatch(f,gw,x0,y0,tw,th){
+  const p=new Float32Array(tw*th*3), rl=tw*3;
+  for(let y=0;y<th;y++) p.set(f.subarray(((y0+y)*gw+x0)*3,((y0+y)*gw+x0)*3+rl),y*rl);
   return p;
 }
-function mirror(p,ts){
+function mirror(p,tw,th){
   const q=new Float32Array(p.length);
-  for(let y=0;y<ts;y++) for(let x=0;x<ts;x++) for(let c=0;c<3;c++)
-    q[(y*ts+x)*3+c]=p[(y*ts+ts-1-x)*3+c];
+  for(let y=0;y<th;y++) for(let x=0;x<tw;x++) for(let c=0;c<3;c++)
+    q[(y*tw+x)*3+c]=p[(y*tw+tw-1-x)*3+c];
   return q;
 }
-function stats(p,ts,st){ let a=0,b=0,n=0;
-  for(let y=0;y<ts;y+=st) for(let x=0;x<ts;x+=st) for(let c=0;c<3;c++){
-    const v=p[(y*ts+x)*3+c]; a+=v; b+=v*v; n++; }
+function stats(p,tw,th,st){ let a=0,b=0,n=0;
+  for(let y=0;y<th;y+=st) for(let x=0;x<tw;x+=st) for(let c=0;c<3;c++){
+    const v=p[(y*tw+x)*3+c]; a+=v; b+=v*v; n++; }
   return {a,n,d:b-a*a/n}; }
-function ncc(f,gw,p,ts,x0,y0,st,T){
+function ncc(f,gw,p,tw,th,x0,y0,st,T){
   let sv=0,sv2=0,svt=0; const s3=st*3;
-  for(let y=0;y<ts;y+=st){ const r=((y0+y)*gw+x0)*3, q=y*ts*3;
-    for(let x=0;x<ts*3;x+=s3) for(let c=0;c<3;c++){
+  for(let y=0;y<th;y+=st){ const r=((y0+y)*gw+x0)*3, q=y*tw*3;
+    for(let x=0;x<tw*3;x+=s3) for(let c=0;c<3;c++){
       const v=f[r+x+c]; sv+=v; sv2+=v*v; svt+=v*p[q+x+c]; } }
   const dv=sv2-sv*sv/T.n;
   if(dv<1e-3||T.d<1e-3) return 0;
   return (svt-sv*T.a/T.n)/Math.sqrt(dv*T.d);
 }
 // best top-left within ±R of (bx,by): coarse pass on every 2nd pixel and offset, then refine
-function search(f,gw,gh,p,ts,bx,by,R){
-  const T2=stats(p,ts,2), T1=stats(p,ts,1);
+function search(f,gw,gh,p,tw,th,bx,by,R){
+  const T2=stats(p,tw,th,2), T1=stats(p,tw,th,1);
   let best=-2, mx=bx, my=by;
   for(let dy=-R;dy<=R;dy+=2) for(let dx=-R;dx<=R;dx+=2){
     const x0=bx+dx, y0=by+dy;
-    if(x0<0||y0<0||x0+ts>gw||y0+ts>gh) continue;
-    const sc=ncc(f,gw,p,ts,x0,y0,2,T2); if(sc>best){ best=sc; mx=x0; my=y0; } }
+    if(x0<0||y0<0||x0+tw>gw||y0+th>gh) continue;
+    const sc=ncc(f,gw,p,tw,th,x0,y0,2,T2); if(sc>best){ best=sc; mx=x0; my=y0; } }
   const cx=mx, cy=my; best=-2;
   for(let dy=-2;dy<=2;dy++) for(let dx=-2;dx<=2;dx++){
     const x0=cx+dx, y0=cy+dy;
-    if(x0<0||y0<0||x0+ts>gw||y0+ts>gh) continue;
-    const sc=ncc(f,gw,p,ts,x0,y0,1,T1); if(sc>best){ best=sc; mx=x0; my=y0; } }
+    if(x0<0||y0<0||x0+tw>gw||y0+th>gh) continue;
+    const sc=ncc(f,gw,p,tw,th,x0,y0,1,T1); if(sc>best){ best=sc; mx=x0; my=y0; } }
   return {x:mx,y:my,score:best};
 }
-function patternLocator(G,ts,bx,by){
+function patternLocator(G,tw,th,bx,by){
   const {gw,gh}=G; let f=toRGB(G.grab());
-  let tpl=cutPatch(f,gw,bx,by,ts);
-  const orig=[tpl.slice(),mirror(tpl,ts)], origT=stats(orig[0],ts,1);
-  const R=Math.max(12,Math.round(ts*0.8));
-  return { flat:origT.d/(ts*ts*3)<4,
+  let tpl=cutPatch(f,gw,bx,by,tw,th);
+  const orig=[tpl.slice(),mirror(tpl,tw,th)], origT=stats(orig[0],tw,th,1);
+  const R=Math.max(12,Math.round(Math.max(tw,th)*0.8));
+  return { flat:origT.d/(tw*th*3)<4,
     locate(px,py,miss){
       f=toRGB(G.grab());
-      const m=search(f,gw,gh,tpl,ts,px,py,R+miss*Math.round(R/3));
-      const look=Math.max(ncc(f,gw,orig[0],ts,m.x,m.y,1,origT),ncc(f,gw,orig[1],ts,m.x,m.y,1,origT));
+      const m=search(f,gw,gh,tpl,tw,th,px,py,R+miss*Math.round(R/3));
+      const look=Math.max(ncc(f,gw,orig[0],tw,th,m.x,m.y,1,origT),ncc(f,gw,orig[1],tw,th,m.x,m.y,1,origT));
       const ok=m.score>=LOST&&look>=DRIFT;
-      if(ok&&m.score>0.8){ const np=cutPatch(f,gw,m.x,m.y,ts); for(let i=0;i<tpl.length;i++) tpl[i]=tpl[i]*0.92+np[i]*0.08; }
+      if(ok&&m.score>0.8){ const np=cutPatch(f,gw,m.x,m.y,tw,th); for(let i=0;i<tpl.length;i++) tpl[i]=tpl[i]*0.92+np[i]*0.08; }
       return {x:m.x,y:m.y,ok,score:m.score};
     }};
 }
@@ -643,69 +1056,83 @@ function smooth(pts,r){
 $('trk').onclick=async()=>{
   if(!W) return;
   if(tracking){ stopTrack=true; return; }
-  tracking=true; stopTrack=false; vid.pause(); $('play').textContent='▶';
-  $('trk').classList.add('on'); $('trk').textContent='stop (esc)';
+  if(!subjectSet){ toast('First drag a box around the subject on the video.'); return; }
+  if(vid.currentTime>=vid.duration-STEP){ toast('The playhead is at the end. Move it back to where tracking should start.'); return; }
+  tracking=true; stopTrack=false; pause(); lostAt=null; trackProg=0;
   pushUndo();
   const t0=vid.currentTime, start=at(t0);
   const before=keys.filter(k=>k.t<t0-0.04), oldKeys=keys.map(k=>({...k}));
   await seekTo(t0);
-  // the patch has to sit inside the frame; remember how far the subject is from its centre
-  const setup=G=>{ const ts=Math.max(6,Math.round(tgtSide()*G.S));
-    const bx=Math.max(0,Math.min(G.gw-ts,Math.round(start.x*G.S-ts/2)));
-    const by=Math.max(0,Math.min(G.gh-ts,Math.round(start.y*G.S-ts/2)));
-    return {G,ts,bx,by,offX:start.x-(bx+ts/2)/G.S,offY:start.y-(by+ts/2)/G.S}; };
-  let K=setup(grabber(180)), L=colourLocator(K.G,K.ts,K.bx,K.by), mode='colour';
+  // the box has to sit inside the frame; remember how far the subject is from its centre
+  const setup=S=>{ const G=grabber(S);
+    const tw=Math.max(6,Math.min(G.gw-2,Math.round(tbox.w*S))), th=Math.max(6,Math.min(G.gh-2,Math.round(tbox.h*S)));
+    const bx=clamp(Math.round(start.x*S-tw/2),0,G.gw-tw), by=clamp(Math.round(start.y*S-th/2),0,G.gh-th);
+    return {G,tw,th,bx,by,offX:start.x-(bx+tw/2)/S,offY:start.y-(by+th/2)/S}; };
+  let K=setup(Math.min(1,180/Math.min(W,H))), L=colourLocator(K.G,K.tw,K.th,K.bx,K.by), mode='colour';
   if(!(L.c0>=0.2&&L.distinct>=6)){
-    K=setup(grabber(360)); L=patternLocator(K.G,K.ts,K.bx,K.by); mode='pattern'; }
-  const {G,ts,offX,offY}=K; let {bx,by}=K;
+    // keep the pattern search affordable for big boxes
+    let S=Math.min(1,360/Math.min(W,H)); const pm=Math.max(tbox.w,tbox.h)*S; if(pm>64) S*=64/pm;
+    K=setup(S); L=patternLocator(K.G,K.tw,K.th,K.bx,K.by); mode='pattern'; }
+  trackMode=mode;
+  const {G,tw,th,offX,offY}=K; let {bx,by}=K;
   const samples=[{t:t0,x:start.x,y:start.y}];
-  let why='', vx=0, vy=0, miss=0, missT=0, n=0;
-  if(mode==='pattern'&&L.flat) why='the dashed square has no detail to lock onto — move it onto the subject or make it bigger';
+  let why='', lost=null, vx=0, vy=0, miss=0, missT=0, n=0;
+  if(mode==='pattern'&&L.flat) why="There's nothing distinctive inside the box to follow. Try a box that fits the subject more tightly.";
   for(let t=t0+STEP; !why && !stopTrack && t<vid.duration-1e-3; t+=STEP){
     await seekTo(t);
+    trackProg=(t-t0)/Math.max(1e-6,vid.duration-t0);
     // look where it's heading
-    const px=Math.max(0,Math.min(G.gw-ts,Math.round(bx+vx))), py=Math.max(0,Math.min(G.gh-ts,Math.round(by+vy)));
+    const px=clamp(Math.round(bx+vx),0,G.gw-tw), py=clamp(Math.round(by+vy),0,G.gh-th);
     const m=L.locate(px,py,miss);
     if(!m.ok){
       if(!miss) missT=t;
-      if(++miss>COAST){ why=`lost the subject at ${missT.toFixed(2)}s — set a keyframe there and track again`; break; }
+      if(++miss>COAST){ lost=missT; why=`Lost the subject at ${fmt(missT)}.`; break; }
       vx*=0.7; vy*=0.7; bx=px; by=py;
-      say(`tracking by ${mode} ${t.toFixed(2)}s  searching…`);
+      $('ttxt').textContent=`${fmt(t)} · searching…`;
       continue;
     }
     if(miss){ vx=vy=0; } else { vx=vx*0.5+(m.x-bx)*0.5; vy=vy*0.5+(m.y-by)*0.5; }
     miss=0; bx=m.x; by=m.y;
-    const sx=(bx+ts/2)/G.S+offX, sy=(by+ts/2)/G.S+offY;
+    const sx=(bx+tw/2)/G.S+offX, sy=(by+th/2)/G.S+offY;
     tgt={x:sx,y:sy};
     samples.push({t,x:sx,y:sy});
     keys=before.concat(samples); sel=-1;
     if(++n%4===0){ renderKeys(); drawFilm(); }
-    say(`tracking by ${mode} ${t.toFixed(2)}s  match ${(m.score*100).toFixed(0)}%`);
+    $('tfill').style.width=(trackProg*100)+'%';
+    $('ttxt').textContent=`${fmt(t)} · following by ${mode} · ${Math.round(Math.min(1,m.score)*100)}% match`;
   }
   // keep everything outside the tracked range; replace what was inside with a light set of keys
   const tEnd=samples[samples.length-1].t;
   const after=oldKeys.filter(k=>k.t>tEnd+0.04);
   const tol=Math.max(2,Math.min(W,H)*0.012);
-  const simp=simplify(smooth(samples,3),tol);
+  const simp=simplify(smooth(samples,3),tol).map(k=>({...k,auto:true}));
   simp[0]={t:t0,x:start.x,y:start.y};
   keys=before.concat(simp,after); sel=-1; tgt=null;
-  tracking=false; $('trk').classList.remove('on'); $('trk').textContent='auto-track';
+  tracking=false;
   renderKeys(); drawFilm(); draw();
   if(samples.length>1){
+    trackedOnce=true;
     if($('interp').value==='ease') $('interp').value='spline';
-    say((why||(stopTrack?'stopped':'tracked to the end'))+`  ·  by ${mode}  ·  ${simp.length} keyframes over ${(tEnd-t0).toFixed(1)}s  (ctrl+z to undo)`);
-  } else { undoStack.pop(); say(why||'nothing to track from here'); }
+    const span=`${fmt(t0)}–${fmt(tEnd)}`;
+    if(lost!=null){
+      lostAt=lost;
+      toast(`${why} Tracked ${span}. Box it again where it reappears and track from there.`,
+        {kind:'warn',ms:12000,action:{label:`Go to ${fmt(lost)}`,fn:()=>{ pause(); vid.currentTime=lost; }}});
+    } else if(stopTrack) toast(`Stopped. Tracked ${span}.`,{action:{label:'Undo',fn:undo}});
+    else toast(`Tracked to the end (${span}). Scrub to check it, then export.`,{kind:'good',action:{label:'Undo',fn:undo}});
+  } else { undoStack.pop(); toast(why||'Nothing to track from here.',{kind:'warn'}); }
+  vid.currentTime=t0;
 };
 
-/* ---------- import json ---------- */
+/* ---------- projects (json) ---------- */
 function readTrack(file){
-  file.text().then(t=>applyTrack(JSON.parse(t))).catch(e=>say('could not read '+file.name+': '+e.message));
+  file.text().then(t=>applyTrack(JSON.parse(t))).catch(e=>toast(`Couldn't read ${file.name}: ${e.message}`,{kind:'warn'}));
 }
 $('imp').onclick=()=>{ if(!tracking) $('impf').click(); };
 $('impf').onchange=e=>{ const f=e.target.files[0]; if(f) readTrack(f); e.target.value=''; };
 function applyTrack(tr){
-  if(!tr||!Array.isArray(tr.keys)||!tr.keys.length) return say('that json has no keyframes');
-  if(!W){ pendingTrack=tr; return say('track loaded — now drop the video it belongs to'); }
+  if(!tr||!Array.isArray(tr.keys)||!tr.keys.length) return toast("That file has no keyframes in it.",{kind:'warn'});
+  if(!W){ pendingTrack=tr; return toast('Project loaded. Now open the video it belongs to.'); }
   pushUndo();
   // coordinates are source pixels: rescale if this video is a different size (e.g. a proxy)
   const sx=W/(+tr.width||W), sy=H/(+tr.height||H);
@@ -713,20 +1140,22 @@ function applyTrack(tr){
     const opt=[...$('ar').options].find(o=>o.value!=='custom'&&Math.abs(+o.value-tr.aspect)<0.002);
     if(opt) $('ar').value=opt.value;
     else { $('ar').value='custom'; $('cw').value=+tr.aspect.toFixed(4); $('chh').value=1; }
-    $('cust').style.display=$('ar').value==='custom'?'flex':'none';
   }
-  if(tr.zoom>0){ $('zoom').value=Math.round(Math.min(3,Math.max(1,tr.zoom))*100);
-    $('zoomv').textContent=(+$('zoom').value/100).toFixed(2)+'×'; }
+  if(tr.zoom>0) $('zoom').value=Math.round(Math.min(3,Math.max(1,tr.zoom))*100);
   $('interp').value=['spline','ease','linear'].includes(tr.interp)?tr.interp:(tr.ease===false?'linear':'ease');
   if(tr.camera in CAM) $('camera').value=tr.camera;
-  cropSize();
-  keys=tr.keys.map(k=>({t:+k.t,x:k.x*sx,y:k.y*sy})).sort((a,b)=>a.t-b.t);
-  sel=-1; layout(); renderKeys(); drawFilm(); draw();
-  say(`imported ${keys.length} keyframes`+(sx!==1||sy!==1?` (rescaled from ${tr.width}×${tr.height})`:''));
+  if(tr.target&&tr.target.w>0) tbox={w:Math.round(tr.target.w*sx),h:Math.round(tr.target.h*sy)};
+  syncSeg(); cropSize();
+  keys=tr.keys.map(k=>({t:+k.t,x:k.x*sx,y:k.y*sy,auto:!!k.auto})).sort((a,b)=>a.t-b.t);
+  // projects saved before keys were flagged: a dense track can only have come from auto-track
+  if(keys.length>40&&!tr.keys.some(k=>'auto' in k)) keys.forEach((k,i)=>{ k.auto=i>0; });
+  subjectSet=true; trackedOnce=keys.length>2; lostAt=null;
+  sel=-1; layout(); renderKeys(); drawFilm(); draw(); grabThumb();
+  toast(`Opened project: ${keys.length} keyframes`+(sx!==1||sy!==1?`, rescaled from ${tr.width}×${tr.height}`:''),{kind:'good'});
 }
 
 /* ---------- export ---------- */
-// the camera path as linear keys (null when locked on): what track_to_ffmpeg.py renders
+// the camera path as linear keys (null when locked): what track_to_ffmpeg.py renders
 function cameraKeys(){
   if(!CAM[$('camera').value]||!vid.duration) return null;
   const P=camPath(), pts=[];
@@ -734,19 +1163,22 @@ function cameraKeys(){
   return simplify(pts,0.4).map(k=>({t:+k.t.toFixed(3),x:+k.x.toFixed(1),y:+k.y.toFixed(1)}));
 }
 $('json').onclick=()=>{
+  if(!W) return;
   const b=new Blob([JSON.stringify({source:SRCNAME,width:W,height:H,
     crop:{w:cw,h:ch},aspect:aspect(),zoom:+$('zoom').value/100,
     interp:$('interp').value, ease:$('interp').value!=='linear',
-    camera:$('camera').value, cameraPath:cameraKeys(),
-    keys:keys.map(k=>({t:+k.t.toFixed(3),x:Math.round(k.x),y:Math.round(k.y)}))},null,1)],
+    camera:$('camera').value, target:{w:tbox.w,h:tbox.h}, cameraPath:cameraKeys(),
+    keys:keys.map(k=>Object.assign({t:+k.t.toFixed(3),x:Math.round(k.x),y:Math.round(k.y)},k.auto?{auto:true}:{}))},null,1)],
     {type:'application/json'});
   const a=document.createElement('a'); a.href=URL.createObjectURL(b);
-  a.download='track.json'; a.click();
+  a.download=(SRCNAME.replace(/\.[^.]+$/,'')||'track')+'.json'; a.click();
 };
 
+let exporting=false;
 $('export').onclick=async()=>{
   if(!W||tracking) return;
-  const btn=$('export'); btn.disabled=true;
+  if(exporting){ vid.pause(); return; }
+  exporting=true; $('export').textContent='Stop export';
   const oh=$('size').value==='native'?ch:+$('size').value;
   const ow=Math.round(oh*cw/ch/2)*2;
   const fps=+$('ofps').value;
@@ -762,7 +1194,7 @@ $('export').onclick=async()=>{
   const chunks=[]; rec.ondataavailable=e=>e.data.size&&chunks.push(e.data);
   const stopped=new Promise(r=>rec.onstop=r);
 
-  $('prog').style.display='flex';
+  $('prog').hidden=false;
   vid.pause(); vid.currentTime=0;
   await new Promise(r=>vid.addEventListener('seeked',r,{once:true}));
   rec.start(); await vid.play();
@@ -774,17 +1206,19 @@ $('export').onclick=async()=>{
     cx.drawImage(vid, p.x-cw/2,p.y-ch/2,cw,ch, 0,0,cv.width,cv.height);
     const f=vid.currentTime/vid.duration;
     $('pfill').style.width=(f*100)+'%';
-    $('ptxt').textContent=`recording ${(f*100).toFixed(0)}%  ${((performance.now()-t0)/1000).toFixed(0)}s`;
+    $('ptxt').textContent=`Recording ${(f*100).toFixed(0)}% · ${((performance.now()-t0)/1000).toFixed(0)}s · plays in real time`;
     requestAnimationFrame(pump);
   })();
-  await new Promise(r=>vid.addEventListener('ended',r,{once:true}));
+  await new Promise(r=>{ const done=()=>{ vid.removeEventListener('ended',done); vid.removeEventListener('pause',done); r(); };
+    vid.addEventListener('ended',done); vid.addEventListener('pause',done); });
   rec.stop(); await stopped;
   const ext=mime.includes('mp4')?'mp4':'webm';
   const blob=new Blob(chunks,{type:mime});
   const a=document.createElement('a'); a.href=URL.createObjectURL(blob);
-  a.download='tracked.'+ext; a.click();
-  $('ptxt').textContent=`saved ${(blob.size/1e6).toFixed(1)}MB as .${ext}`;
-  btn.disabled=false;
+  a.download=(SRCNAME.replace(/\.[^.]+$/,'')||'video')+'-reframed.'+ext; a.click();
+  $('ptxt').textContent=`Saved ${(blob.size/1e6).toFixed(1)} MB as .${ext}`;
+  exporting=false; $('export').textContent='Export video';
+  toast(`Exported ${(blob.size/1e6).toFixed(1)} MB .${ext}`,{kind:'good'});
 };
 </script>
 </body>
